@@ -1,0 +1,238 @@
+// jpquery_tests.nv — the API suite for the parser and the typed query.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: jsonpath-nv.<module>.<fn>`.
+//
+// THE CASES ARE RFC 9535's OWN.  The specification's § 1.5 gives a
+// bookstore document and a table of queries against it with the exact
+// node list each one must produce; §§ 2.3 to 2.5 give a further table
+// per selector; § 2.4 gives the well-typedness examples, including the
+// four it marks invalid.  Those are the queries below, and the whole
+// of the JSONPath Compliance Test Suite becomes a generated run beside
+// this one when the implementation lands.
+//
+// THE WELL-TYPEDNESS CASES ARE THE ONES IMPLEMENTATIONS SKIP.  § 2.4.3
+// makes `length(@.*)` a query that does not parse, not a query that
+// answers nothing, and the last test here is what keeps that true.
+
+use std.test
+use std.list
+use jpquery
+use jperror
+
+// A query that must parse, or a failed assertion.
+fn ok(text: Str) -> jpquery.JpQuery [io]
+    match jpquery.parse(text)
+        Ok(q)  => q
+        Err(_) =>
+            test.assert(false)
+            JpQuery { absolute: true, segments: [] }
+
+// The fault a query is refused with, or `None` when it parses.
+fn refused(text: Str) -> ?jperror.JpFaultKind [io]
+    match jpquery.parse(text)
+        Ok(_)  => None
+        Err(f) => Some(f.kind)
+
+@test
+fn test_the_shapes_rfc_9535_section_1_5_writes() [io]
+    test.case("the root on its own")
+    test.assert(list.len(ok("$").segments) == 0)
+    test.assert(ok("$").absolute)
+
+    test.case("the shorthand and the quoted form are one query")
+    test.assert(jpquery.render(ok("$.store.book")) == jpquery.render(ok("$['store']['book']")))
+
+    test.case("a segment may hold several selectors")
+    let multi = ok("$[0, 'a', 1:3]")
+    test.assert(list.len(multi.segments) == 1)
+    match list.get(multi.segments, 0)
+        JpChildSeg(sels)   => test.assert(list.len(sels) == 3)
+        JpDescendantSeg(_) => test.assert(false)
+
+    test.case("a descendant segment is its own arm, not a flag")
+    match list.get(ok("$..price").segments, 0)
+        JpDescendantSeg(sels) => test.assert(list.len(sels) == 1)
+        JpChildSeg(_)         => test.assert(false)
+    test.assert(jpquery.has_descendant(ok("$..a")))
+    test.assert(jpquery.has_descendant(ok("$.a")) == false)
+
+    test.case("depth counts segments, so an untrusted query can be bounded")
+    test.assert(jpquery.depth(ok("$..a..b")) == 2)
+
+@test
+fn test_the_five_selectors_each_parse_to_their_own_arm() [io]
+    test.case("a name")
+    match list.get(ok("$['a']").segments, 0)
+        JpChildSeg(sels)   =>
+            match list.get(sels, 0)
+                JpNameSel(n) => test.assert(n == "a")
+                _            => test.assert(false)
+        JpDescendantSeg(_) =>
+            test.assert(false)
+
+    test.case("a wildcard, an index and a negative index")
+    test.assert(jpquery.render(ok("$[*]")) != "")
+    test.assert(jpquery.render(ok("$[0]")) != "")
+    test.assert(jpquery.render(ok("$[-1]")) != "")
+
+    test.case("a slice keeps its parts absent rather than defaulting them")
+    match list.get(ok("$[::-1]").segments, 0)
+        JpChildSeg(sels)   =>
+            match list.get(sels, 0)
+                JpSliceSel(b) =>
+                    test.assert(b.start == None)
+                    test.assert(b.end == None)
+                    test.assert(b.step == Some(0 - 1))
+                _             =>
+                    test.assert(false)
+        JpDescendantSeg(_) =>
+            test.assert(false)
+
+    test.case("a step of zero is refused — it can only select nothing")
+    test.assert(refused("$[::0]") == Some(JpBadSlice))
+
+    test.case("an index past the interoperable range is refused")
+    test.assert(jpquery.MAX_INDEX == 9007199254740991)
+    test.assert(refused("$[9007199254740992]") == Some(JpBadIndex))
+
+    test.case("a filter")
+    match list.get(ok("$[?@.a]").segments, 0)
+        JpChildSeg(sels)   =>
+            match list.get(sels, 0)
+                JpFilterSel(_) => test.assert(true)
+                _              => test.assert(false)
+        JpDescendantSeg(_) =>
+            test.assert(false)
+
+@test
+fn test_the_filter_grammar_parses_to_the_expression_tree() [io]
+    test.case("a bare query is an existence test")
+    let exists = ok("$[?@.a]")
+    test.assert(jpquery.render(exists) != "")
+
+    test.case("the logical operators, and their precedence")
+    test.assert(refused("$[?@.a && @.b || @.c]") == None)
+    test.assert(refused("$[?!(@.a && @.b)]") == None)
+    test.assert(refused("$[?@.a &&]") == Some(JpBadFilter))
+
+    test.case("all six comparisons")
+    test.assert(refused("$[?@.a == 1]") == None)
+    test.assert(refused("$[?@.a != 1]") == None)
+    test.assert(refused("$[?@.a < 1]") == None)
+    test.assert(refused("$[?@.a <= 1]") == None)
+    test.assert(refused("$[?@.a > 1]") == None)
+    test.assert(refused("$[?@.a >= 1]") == None)
+
+    test.case("all six literals")
+    test.assert(refused("$[?@.a == 'x']") == None)
+    test.assert(refused("$[?@.a == 1]") == None)
+    test.assert(refused("$[?@.a == 1.5]") == None)
+    test.assert(refused("$[?@.a == true]") == None)
+    test.assert(refused("$[?@.a == false]") == None)
+    test.assert(refused("$[?@.a == null]") == None)
+
+    test.case("a filter may reach the document root, not only the node")
+    test.assert(refused("$[?@.a == $.expected]") == None)
+
+    test.case("a comparison operand must be a SINGULAR query")
+    test.assert(refused("$[?@.* == 1]") == Some(JpNotSingular))
+    test.assert(refused("$[?@[?@.b] == 1]") == Some(JpNotSingular))
+
+@test
+fn test_the_five_function_extensions_and_their_declared_types() [io]
+    test.case("the five names, and nothing else")
+    test.assert(jpquery.function_named("length") == Some(JpFnLength))
+    test.assert(jpquery.function_named("count") == Some(JpFnCount))
+    test.assert(jpquery.function_named("match") == Some(JpFnMatch))
+    test.assert(jpquery.function_named("search") == Some(JpFnSearch))
+    test.assert(jpquery.function_named("value") == Some(JpFnValue))
+    test.assert(jpquery.function_named("size") == None)
+    test.assert(refused("$[?size(@.a) > 1]") == Some(JpUnknownFunction))
+
+    test.case("a name round-trips")
+    test.assert(jpquery.function_name(JpFnSearch) == "search")
+
+    test.case("section 2.4.2's table, as data")
+    test.assert(list.len(jpquery.parameter_types(JpFnLength)) == 1)
+    test.assert(list.len(jpquery.parameter_types(JpFnMatch)) == 2)
+    test.assert(jpquery.result_type(JpFnCount) == JpTypeValue)
+    test.assert(jpquery.result_type(JpFnMatch) == JpTypeLogical)
+    test.assert(list.get(jpquery.parameter_types(JpFnCount), 0) == JpTypeNodes)
+
+    test.case("the arity is checked")
+    test.assert(refused("$[?length(@.a, @.b) > 1]") == Some(JpWrongArity))
+
+@test
+fn test_well_typedness_is_a_parse_error_and_not_an_empty_answer() [io]
+    test.case("length takes a ValueType, so a non-singular query is refused")
+    test.assert(refused("$[?length(@.*) > 1]") == Some(JpWrongArgumentType))
+
+    test.case("count takes a NodesType, so it accepts one")
+    test.assert(refused("$[?count(@.*) > 1]") == None)
+
+    test.case("a LogicalType result may not be compared")
+    test.assert(refused("$[?match(@.a, 'x') == true]") == Some(JpWrongArgumentType))
+
+    test.case("but it may stand alone as the test")
+    test.assert(refused("$[?match(@.a, 'x')]") == None)
+
+    test.case("a ValueType result may not stand alone as the test")
+    test.assert(refused("$[?length(@.a)]") == Some(JpWrongArgumentType))
+
+    test.case("check_types answers the same thing on a query built in code")
+    test.assert(jpquery.check_types(ok("$.a")) == None)
+
+@test
+fn test_a_singular_query_is_recognised_and_can_be_demanded() [io]
+    test.case("names and indices only")
+    test.assert(jpquery.is_singular(ok("$.a[0].b")))
+    test.assert(jpquery.is_singular(ok("$.*")) == false)
+    test.assert(jpquery.is_singular(ok("$[0:1]")) == false)
+    test.assert(jpquery.is_singular(ok("$..a")) == false)
+
+    test.case("parse_singular refuses the rest at parse time")
+    match jpquery.parse_singular("$.a[0]")
+        Err(_) => test.assert(false)
+        Ok(q)  => test.assert(jpquery.is_singular(q))
+    match jpquery.parse_singular("$.*")
+        Ok(_)  => test.assert(false)
+        Err(f) => test.assert(f.kind == JpNotSingular)
+
+@test
+fn test_the_ways_a_query_is_not_one() [io]
+    test.case("no root")
+    test.assert(refused("store.book") == Some(JpNoRoot))
+
+    test.case("a bare @ outside a filter")
+    test.assert(refused("@.a") == Some(JpNoRoot))
+
+    test.case("a name that is not a shorthand and not quoted")
+    test.assert(refused("$.1a") == Some(JpBadName))
+
+    test.case("an escape RFC 9535 does not define")
+    test.assert(refused("$['a\\q']") == Some(JpBadEscape))
+
+    test.case("something after the end")
+    test.assert(refused("$.a extra") == Some(JpTrailingInput))
+
+    test.case("the query ending inside a construct")
+    test.assert(refused("$['a") == Some(JpUnexpectedEnd))
+
+    test.case("a fault has a name and a message a program can quote")
+    test.assert(jperror.kind_name(JpNotSingular) == "not-singular")
+    let f = jperror.fault(JpBadSlice, 7, 12)
+    test.assert(f.at == 7)
+    test.assert(f.to == 12)
+    test.assert(jperror.message(f) != "")
+
+@test
+fn test_render_is_a_normalisation_and_not_an_echo() [io]
+    test.case("the shorthand comes back quoted")
+    test.assert(jpquery.render(ok("$.a.b")) == "$['a']['b']")
+
+    test.case("an index stays an index")
+    test.assert(jpquery.render(ok("$.a[0]")) == "$['a'][0]")
+
+    test.case("so two spellings of one query are one string")
+    test.assert(jpquery.render(ok("$[\"a\"]")) == jpquery.render(ok("$.a")))

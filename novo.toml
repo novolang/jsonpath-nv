@@ -1,0 +1,50 @@
+[package]
+name        = "jsonpath-nv"
+version     = "0.0.1"
+description = "RFC 9535 JSONPath over the standard library's JSON value: the whole grammar as a typed query including filter expressions, the well-typedness rules of section 2.4.3 checked at parse time, a total evaluator answering a node list with normalized paths, the five function extensions, and the I-Regexp subset match() and search() need.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`: a parse of a string the caller typed, and a walk over a value
+# the caller already parsed.  No function declares an effect.
+layer       = "core"
+
+category    = "data"
+
+tags        = ["jsonpath", "rfc9535", "json", "query", "iregexp", "rfc9485", "sans-io"]
+repository  = "https://github.com/novolang/jsonpath-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Selecting from a JSON document by RFC 9535"
+
+[dependencies]
+# None, and the two absences are both arguments the README makes.
+#
+# NOT a JSON package.  The value this selects over is the STANDARD
+# LIBRARY's (`std.json`), deliberately, because a second JSON value type
+# in the assembly would mean every caller converting a document before
+# it could query it.  What that costs is written down: `std.json` cannot
+# tell `{}` from `null`, which is the one place RFC 9535's `length()`
+# cannot be answered correctly, and the README names it.
+#
+# NOT unicode-nv, and not std.regex.  I-Regexp's `\p{...}` needs the
+# Unicode general categories, and `jpregex.compile_with` takes that
+# lookup as a `fn(Int) -> Str` the caller supplies — which is
+# `docs/publishing.md` § How a `core` package takes a stream from its
+# host applied to a table rather than to a stream.  A caller with
+# unicode-nv passes its own; a caller without one gets
+# `JpNoCategoryLookup` for a pattern that needs it, rather than a guess.
+# std.regex is a different language (PCRE-shaped) and accepting a
+# pattern I-Regexp forbids would make a query portable-looking and not
+# portable.

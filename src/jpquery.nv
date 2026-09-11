@@ -1,0 +1,386 @@
+// jpquery.nv — a JSONPath query as a typed value, and the parse that
+// produces one.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE WHOLE GRAMMAR IS IN ONE MODULE, filter expressions included, and
+// the reason is that RFC 9535's grammar is mutually recursive: a filter
+// SELECTOR holds an expression, and an expression holds a QUERY, which
+// holds segments, which hold selectors.  Splitting it would need two
+// modules that referred to each other, and novo-lang module imports do
+// not describe a cycle.  Evaluation is where the split belongs and
+// `jpeval` is that module.
+//
+// THE TYPES ARE RFC 9535's OWN, NAMED THE SAME.  `JpSegment` is § 2.5's
+// segment, `JpSelector` is § 2.3's selector with its five arms in the
+// specification's order, `JpExpr` is § 2.3.5's logical expression.  A
+// reader with the RFC open should be able to point at each one.  That
+// is also why nothing here is flattened for convenience: a "path" of
+// strings would be a different language.
+//
+// WELL-TYPEDNESS IS CHECKED AT PARSE TIME, which is § 2.4.3 and the
+// part implementations skip.  `length(@.*)` is not a query that answers
+// nothing; it is not a query.  `@.*` is a `NodesType` and `length`
+// takes a `ValueType`, and the only nodes-to-value conversion the RFC
+// allows is a singular query used directly.  Refusing it here means a
+// caller finds out when it compiles the query rather than when a
+// document happens to have two matching members.
+
+use jperror
+
+// The largest array index a query may name.
+//
+// RFC 9535 § 2.1 bounds it at 2^53 - 1, because a JSON number is an
+// IEEE double and an index beyond that cannot be written exactly.
+pub const MAX_INDEX = 9007199254740991
+
+// A whole query: where it starts, and the segments that follow.
+//
+// ```novo
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse("$.store.book[0].title")
+//         Err(f)  => println("${f.at}")
+//         Ok(q)   => println("${q.absolute}")
+// ```
+pub struct JpQuery
+    // True for a query rooted at `$`, false for one rooted at `@` —
+    // which is only legal inside a filter, where `@` is the current
+    // node.  A `$` inside a filter is legal too and means the document
+    // root, which is how a filter compares a member against a value
+    // from somewhere else in the document.
+    absolute: Bool
+    segments: [JpSegment]
+
+// One segment: child or descendant, and what it selects.
+//
+// Both arms hold a LIST of selectors because `[0, 'a', 1:2]` is one
+// segment with three, and its result is their results concatenated in
+// selector order — not in document order, which is the detail that
+// makes `$[2,0]` answer the third element before the first.
+pub enum JpSegment
+    // `.name`, `.*`, `[...]` — the children of each input node.
+    JpChildSeg(selectors: [JpSelector])
+    // `..name`, `..*`, `..[...]` — each input node and all of its
+    // descendants, visited in document order.
+    JpDescendantSeg(selectors: [JpSelector])
+
+// One selector.  Five arms, in RFC 9535 § 2.3's own order.
+pub enum JpSelector
+    // `'name'` or the `.name` shorthand: one member of an object.
+    JpNameSel(name: Str)
+    // `*`: every member of an object, or every element of an array.
+    JpWildcardSel
+    // `0`, `-1`: one element of an array, counted from the end when
+    // negative.
+    JpIndexSel(index: Int)
+    // `1:5:2`: a range of elements, with Python's semantics and
+    // Python's clamping.
+    JpSliceSel(bounds: JpSlice)
+    // `?<expr>`: the children for which the expression is true.
+    JpFilterSel(expr: JpExpr)
+
+// A slice's three parts, each absent or present.
+//
+// `?Int` rather than a default, because the defaults DEPEND ON THE
+// STEP's sign: `[::-1]` starts at the end and `[::1]` starts at the
+// beginning, so an absent start is not zero, it is absent.  Collapsing
+// them at parse time would make `[::-1]` reverse nothing.
+pub struct JpSlice
+    start: ?Int
+    end: ?Int
+    // Absent means 1.  Zero is `JpBadSlice`: RFC 9535 § 2.3.4.2.2
+    // says a step of zero selects nothing, and a query that can only
+    // select nothing is one a caller wants told about.
+    step: ?Int
+
+// A logical expression inside a filter.
+//
+// Directly recursive, which is what the grammar is.  `JpExprTest` is
+// the existence test — a bare query inside a filter is true when it
+// selects at least one node — and it is also how a function returning
+// `LogicalType` appears, through `JpExprCall`.
+pub enum JpExpr
+    // `a || b`.  Short-circuiting is unobservable here because nothing
+    // in the grammar has an effect, so the order is not specified.
+    JpExprOr(left: JpExpr, right: JpExpr)
+    // `a && b`.
+    JpExprAnd(left: JpExpr, right: JpExpr)
+    // `!a`.
+    JpExprNot(inner: JpExpr)
+    // A bare query: true when it selects at least one node.  `@.a` is
+    // "has a member a", and `@.a[?@.b]` is "has an a with a b in it".
+    JpExprTest(query: JpQuery)
+    // `a == b`, `a < b`, and the other four.
+    JpExprCompare(left: JpOperand, op: JpCompareOp, right: JpOperand)
+    // A call to a function whose declared result is `LogicalType` —
+    // `match()` and `search()` of the five RFC 9535 defines.  A call to
+    // a `ValueType` function in this position is `JpWrongArgumentType`.
+    JpExprCall(call: JpCall)
+
+// The six comparison operators, in RFC 9535 § 2.3.5.2.1's order.
+pub enum JpCompareOp
+    JpOpEq
+    JpOpNe
+    JpOpLt
+    JpOpLe
+    JpOpGt
+    JpOpGe
+
+// What may stand on either side of a comparison.
+//
+// A query here must be SINGULAR — only names and indices, no wildcard,
+// no slice, no filter — because a comparison compares one value with
+// one value and a nodelist is not a value.  `jpquery.parse` refuses a
+// non-singular one with `JpNotSingular` rather than picking the first
+// node, which is what a reader coming from a lenient implementation
+// will expect it to do.
+pub enum JpOperand
+    JpOperandLiteral(literal: JpLiteral)
+    JpOperandQuery(query: JpQuery)
+    JpOperandCall(call: JpCall)
+
+// A literal in a filter.  RFC 9535 has no object or array literals, so
+// the six arms are all there are.
+pub enum JpLiteral
+    JpLitStr(value: Str)
+    // A JSON number with no fraction and no exponent that fits 64 bits.
+    JpLitInt(value: Int)
+    // Every other JSON number.  Kept apart from `JpLitInt` because the
+    // spelling is what decides which one a literal is, and merged again
+    // at comparison time because § 2.3.5.2.2 says `1` and `1.0` are
+    // equal.
+    JpLitFloat(value: Float)
+    JpLitTrue
+    JpLitFalse
+    JpLitNull
+
+// The five function extensions RFC 9535 defines.
+//
+// An enum rather than a string, because the set is closed in the
+// specification and because the arity and the argument types below are
+// a table over exactly these five.  A caller with its own extension
+// registers it with `jpeval`; the parse of a name it does not know is
+// `JpUnknownFunction`.
+pub enum JpFunction
+    // `length(ValueType) -> ValueType`.  Members of an object,
+    // characters of a string, elements of an array; **Nothing** for
+    // anything else, which is the arm this package cannot answer today
+    // — see the README.
+    JpFnLength
+    // `count(NodesType) -> ValueType`.  How many nodes the argument
+    // selected.
+    JpFnCount
+    // `match(ValueType, ValueType) -> LogicalType`.  The whole string
+    // matches the I-Regexp pattern.
+    JpFnMatch
+    // `search(ValueType, ValueType) -> LogicalType`.  Some substring
+    // matches.
+    JpFnSearch
+    // `value(NodesType) -> ValueType`.  The one node's value when the
+    // argument selected exactly one, Nothing otherwise.
+    JpFnValue
+
+// The three types § 2.4.1 gives a function's arguments and result.
+pub enum JpArgType
+    // A JSON value, or Nothing.
+    JpTypeValue
+    // True or false.  Not a JSON value: `LogicalTrue` is not `true`.
+    JpTypeLogical
+    // A nodelist.
+    JpTypeNodes
+
+// One argument of a call.
+pub enum JpArgument
+    JpArgLiteral(literal: JpLiteral)
+    // A query.  Whether it is `ValueType` or `NodesType` depends on the
+    // parameter it is passed to and on whether it is singular, which is
+    // § 2.4.3 and what `check_types` decides.
+    JpArgQuery(query: JpQuery)
+    JpArgCall(call: JpCall)
+    // A logical expression, for a parameter declared `LogicalType`.
+    JpArgLogical(expr: JpExpr)
+
+// A call to a function extension.
+pub struct JpCall
+    function: JpFunction
+    arguments: [JpArgument]
+
+// Parse a query.
+//
+// **The load-bearing call of this module.**  A string a person typed in
+// and a typed value out, or the offset of the first thing that was not
+// RFC 9535.  The well-typedness rules of § 2.4.3 are checked here, so a
+// query that parses is a query that runs.
+//
+// ```novo
+// use std.list
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse("$.store.book[?@.price < 10].title")
+//         Err(f) => println("${f.at}")
+//         Ok(q)  => println("${list.len(q.segments)}")
+// ```
+pub fn parse(query: Str) -> Result<JpQuery, jperror.JpFault> []
+    todo("jsonpath-nv.jpquery.parse")
+
+// Parse a query that is required to be singular.
+//
+// The convenience for a caller that is going to ask for one value:
+// `jpeval.select_one` over a non-singular query would have to decide
+// what "the" value of three nodes is, and refusing at parse time is
+// the answer that does not have to.
+//
+// ```novo
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse_singular("$.a[0].b")
+//         Err(f) => println("${f.at}")
+//         Ok(q)  => println("${jpquery.is_singular(q)}")
+// ```
+pub fn parse_singular(query: Str) -> Result<JpQuery, jperror.JpFault> []
+    todo("jsonpath-nv.jpquery.parse_singular")
+
+// Whether a query is singular: every segment a child segment with one
+// selector, and that selector a name or an index.
+//
+// § 2.3.5.2.1's rule, public because it is what decides whether a query
+// may be a comparison operand and a caller building a query in code
+// needs the same answer the parser uses.
+//
+// ```novo
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse("$.a.b")
+//         Err(_) => println("did not parse")
+//         Ok(q)  => println("${jpquery.is_singular(q)}")
+// ```
+pub fn is_singular(q: JpQuery) -> Bool []
+    todo("jsonpath-nv.jpquery.is_singular")
+
+// The query rendered back as text, in RFC 9535's canonical spelling.
+//
+// Quoted names throughout, no shorthand: `$['store']['book'][0]`.  Not
+// the text that was parsed — a round trip through this is a
+// normalisation, which is what makes two queries that mean the same
+// thing comparable as strings.
+//
+// ```novo
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse("$.a[0]")
+//         Err(_) => println("did not parse")
+//         Ok(q)  => println(jpquery.render(q))
+// ```
+pub fn render(q: JpQuery) -> Str []
+    todo("jsonpath-nv.jpquery.render")
+
+// The function's name as RFC 9535 spells it.
+//
+// ```novo
+// use jpquery
+//
+// fn main() [io]
+//     println(jpquery.function_name(JpFnLength))
+// ```
+pub fn function_name(f: JpFunction) -> Str []
+    todo("jsonpath-nv.jpquery.function_name")
+
+// The function a name denotes, or `None`.
+//
+// ```novo
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.function_named("count")
+//         Some(f) => println(jpquery.function_name(f))
+//         None    => println("not one of the five")
+// ```
+pub fn function_named(name: Str) -> ?JpFunction []
+    todo("jsonpath-nv.jpquery.function_named")
+
+// The declared types of a function's parameters, in order.
+//
+// § 2.4.2's table, as data rather than as prose, so that
+// `check_types` and a caller registering its own extension read the
+// same rule.
+//
+// ```novo
+// use std.list
+// use jpquery
+//
+// fn main() [io]
+//     println("${list.len(jpquery.parameter_types(JpFnMatch))}")
+// ```
+pub fn parameter_types(f: JpFunction) -> [JpArgType] []
+    todo("jsonpath-nv.jpquery.parameter_types")
+
+// The declared type of a function's result.
+//
+// ```novo
+// use jpquery
+//
+// fn main() [io]
+//     println("${jpquery.result_type(JpFnCount) == JpTypeValue}")
+// ```
+pub fn result_type(f: JpFunction) -> JpArgType []
+    todo("jsonpath-nv.jpquery.result_type")
+
+// Check § 2.4.3's well-typedness rules over a parsed query, and answer
+// the first violation.
+//
+// `parse` already calls it; this is public so that a caller BUILDING a
+// query in code — a query compiler, a UI that assembles filters — can
+// check one it never wrote as text.
+//
+// ```novo
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse("$.a")
+//         Err(_) => println("did not parse")
+//         Ok(q)  =>
+//             match jpquery.check_types(q)
+//                 Some(f) => println("${f.at}")
+//                 None    => println("well typed")
+// ```
+pub fn check_types(q: JpQuery) -> ?jperror.JpFault []
+    todo("jsonpath-nv.jpquery.check_types")
+
+// How many segments deep a query is, descendant segments included.
+//
+// What a caller bounding an untrusted query reads before it runs one:
+// a query is cheap to parse and a `..` over a large document is not.
+//
+// ```novo
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse("$..a..b")
+//         Err(_) => println("did not parse")
+//         Ok(q)  => println("${jpquery.depth(q)}")
+// ```
+pub fn depth(q: JpQuery) -> Int []
+    todo("jsonpath-nv.jpquery.depth")
+
+// Whether a query contains a descendant segment.
+//
+// The other half of the same question: `$..*` is the query that walks
+// the whole document, and a service accepting queries from outside may
+// want to refuse it before it runs it rather than bound it afterwards.
+//
+// ```novo
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse("$..a")
+//         Err(_) => println("did not parse")
+//         Ok(q)  => println("${jpquery.has_descendant(q)}")
+// ```
+pub fn has_descendant(q: JpQuery) -> Bool []
+    todo("jsonpath-nv.jpquery.has_descendant")

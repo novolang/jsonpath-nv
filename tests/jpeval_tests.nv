@@ -1,0 +1,289 @@
+// jpeval_tests.nv — the API suite for the evaluator, the normalized
+// paths and the I-Regexp subset.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: jsonpath-nv.<module>.<fn>`.
+//
+// THE DOCUMENT AND THE EXPECTED NODE LISTS ARE RFC 9535 § 1.5's OWN.
+// The specification opens with a bookstore — two books, a bicycle,
+// prices and authors — and a table of queries against it with the exact
+// result each must produce.  Those are the assertions below, quoted so
+// a reviewer can check them against the RFC rather than against this
+// package, and the JSONPath Compliance Test Suite becomes a generated
+// run beside this one when the implementation lands.
+//
+// THE ORDER CASES MATTER AS MUCH AS THE CONTENTS.  § 2.5.1.2 makes a
+// segment's result the concatenation of its selectors' results IN
+// SELECTOR ORDER, so `$[2,0]` answers the third element before the
+// first; an implementation that sorted by document order would pass
+// every "how many" assertion and fail every "which one first".
+
+use std.test
+use std.list
+use std.json
+use jpquery
+use jpeval
+use jpregex
+
+// RFC 9535 § 1.5's bookstore, reduced to the members the assertions
+// name.
+fn store() -> Str
+    let one = "{\"category\":\"reference\",\"author\":\"Nigel Rees\",\"title\":\"Sayings\",\"price\":8.95}"
+    let two = "{\"category\":\"fiction\",\"author\":\"Waugh\",\"title\":\"Sword\",\"price\":12.99}"
+    let bike = "{\"color\":\"red\",\"price\":399}"
+    "{\"store\":{\"book\":[${one},${two}],\"bicycle\":${bike}}}"
+
+fn doc(text: Str) -> JsonValueH [io]
+    match json.parse(text)
+        Some(v) => v
+        None    =>
+            test.assert(false)
+            json.null()
+
+fn nodes(text: Str, source: Str) -> [jpeval.JpNode] [io]
+    match jpquery.parse(text)
+        Err(_) =>
+            test.assert(false)
+            []
+        Ok(q)  =>
+            jpeval.select(q, doc(source))
+
+@test
+fn test_the_queries_rfc_9535_section_1_5_tabulates() [io]
+    let src = store()
+
+    test.case("every author — the table's first row")
+    test.assert(list.len(nodes("$.store.book[*].author", src)) == 2)
+
+    test.case("every author anywhere")
+    test.assert(list.len(nodes("$..author", src)) == 2)
+
+    test.case("everything in the store")
+    test.assert(list.len(nodes("$.store.*", src)) == 2)
+
+    test.case("every price in the store, the bicycle's included")
+    test.assert(list.len(nodes("$.store..price", src)) == 3)
+
+    test.case("the second book")
+    test.assert(list.len(nodes("$..book[1]", src)) == 1)
+
+    test.case("the last book, by a negative index and by a slice")
+    test.assert(list.len(nodes("$..book[-1]", src)) == 1)
+    test.assert(list.len(nodes("$..book[0:2]", src)) == 2)
+
+    test.case("the books with a price below ten")
+    test.assert(list.len(nodes("$..book[?@.price < 10]", src)) == 1)
+
+    test.case("the books that have a category at all")
+    test.assert(list.len(nodes("$..book[?@.category]", src)) == 2)
+
+@test
+fn test_the_order_is_the_specification_s_and_not_document_order() [io]
+    let src = "{\"a\":[10,20,30]}"
+
+    test.case("a segment's selectors answer in SELECTOR order")
+    let picked = nodes("$.a[2,0]", src)
+    test.assert(list.len(picked) == 2)
+    test.assert(list.get(picked, 0).path == "$['a'][2]")
+    test.assert(list.get(picked, 1).path == "$['a'][0]")
+
+    test.case("a wildcard answers in document order")
+    let all = nodes("$.a[*]", src)
+    test.assert(list.get(all, 0).path == "$['a'][0]")
+
+    test.case("a negative step reverses")
+    let back = nodes("$.a[::-1]", src)
+    test.assert(list.get(back, 0).path == "$['a'][2]")
+
+@test
+fn test_every_node_knows_where_it_was() [io]
+    let src = store()
+
+    test.case("the path is normalized: quoted throughout, no shorthand")
+    let first = nodes("$.store.book[0].title", src)
+    test.assert(list.get(first, 0).path == "$['store']['book'][0]['title']")
+
+    test.case("paths alone, for a tool that already holds the document")
+    match jpquery.parse("$..price")
+        Err(_) => test.assert(false)
+        Ok(q)  => test.assert(list.len(jpeval.select_paths(q, doc(src))) == 3)
+
+    test.case("values alone, for a caller that will not use the locations")
+    match jpquery.parse("$..price")
+        Err(_) => test.assert(false)
+        Ok(q)  => test.assert(list.len(jpeval.select_values(q, doc(src))) == 3)
+
+    test.case("a path can be built without spelling the quoting rules")
+    let steps = [jpeval.name_step("a"), jpeval.index_step(0)]
+    test.assert(jpeval.normalized_path(steps) == "$['a'][0]")
+
+    test.case("and read back, so a stored path is a walk rather than a query")
+    match jpeval.path_steps("$['a'][0]")
+        None    =>
+            test.assert(false)
+        Some(s) =>
+            test.assert(list.len(s) == 2)
+            test.assert(list.get(s, 1).is_index)
+
+    test.case("and followed")
+    match jpeval.at_path(doc("{\"a\":[7]}"), "$['a'][0]")
+        None    => test.assert(false)
+        Some(v) => test.assert(json.to_int(v) == Some(7))
+    test.assert(jpeval.at_path(doc("{\"a\":[7]}"), "$['b']") == None)
+
+@test
+fn test_evaluation_cannot_fail() [io]
+    test.case("a member nothing has selects nothing, rather than raising")
+    test.assert(list.len(nodes("$.nope.deeper", "{\"a\":1}")) == 0)
+
+    test.case("an index past the end selects nothing")
+    test.assert(list.len(nodes("$.a[9]", "{\"a\":[1]}")) == 0)
+
+    test.case("a comparison of two different types is false, not an error")
+    test.assert(list.len(nodes("$[?@.a < 'x']", "[{\"a\":1}]")) == 0)
+
+    test.case("a filter over a value that is not an object is false")
+    test.assert(list.len(nodes("$[?@.a]", "[1,2,3]")) == 0)
+
+    test.case("the one call that CAN fail is the one that parses")
+    match jpeval.query(doc("{\"a\":1}"), "not a query")
+        Ok(_)  => test.assert(false)
+        Err(f) => test.assert(f.at >= 0)
+    match jpeval.query(doc("{\"a\":1}"), "$.a")
+        Err(_)    => test.assert(false)
+        Ok(found) => test.assert(list.len(found) == 1)
+
+@test
+fn test_a_walk_can_be_bounded_without_being_made_to_fail() [io]
+    test.case("the defaults are bounds no ordinary document reaches")
+    let limits = jpeval.default_limits()
+    test.assert(limits.max_depth > 0)
+    test.assert(limits.max_nodes > 0)
+    test.assert(limits.max_visits >= limits.max_nodes)
+
+    test.case("an unbounded walk over a small document finishes")
+    match jpquery.parse("$..*")
+        Err(_) =>
+            test.assert(false)
+        Ok(q)  =>
+            let sel = jpeval.select_with(q, doc("{\"a\":{\"b\":1}}"), limits)
+            test.assert(sel.truncated == false)
+            test.assert(sel.visited > 0)
+
+    test.case("a bound that is reached truncates and keeps what it found")
+    var tiny = jpeval.default_limits()
+    tiny.max_nodes = 1
+    match jpquery.parse("$..*")
+        Err(_) =>
+            test.assert(false)
+        Ok(q)  =>
+            let sel = jpeval.select_with(q, doc("{\"a\":{\"b\":1}}"), tiny)
+            test.assert(sel.truncated)
+            test.assert(list.len(sel.nodes) == 1)
+
+    test.case("a singular query answers one value or none, never a list")
+    match jpquery.parse_singular("$.a.b")
+        Err(_) =>
+            test.assert(false)
+        Ok(q)  =>
+            test.assert(jpeval.select_one(q, doc("{\"a\":{\"b\":7}}")) != None)
+            test.assert(jpeval.select_one(q, doc("{\"a\":1}")) == None)
+
+@test
+fn test_comparison_is_structural_and_numbers_are_not_spellings() [io]
+    test.case("one and one point zero are the same JSON number")
+    test.assert(jpeval.value_equals(doc("1"), doc("1.0")))
+
+    test.case("arrays and objects compare by contents, not by rendering")
+    test.assert(jpeval.value_equals(doc("[1,2]"), doc("[1,2]")))
+    test.assert(jpeval.value_equals(doc("[1,2]"), doc("[2,1]")) == false)
+    test.assert(jpeval.value_equals(doc("{\"a\":1,\"b\":2}"), doc("{\"b\":2,\"a\":1}")))
+
+    test.case("an empty object is not null — which std.json alone cannot say")
+    test.assert(jpeval.value_equals(doc("{}"), doc("null")) == false)
+
+    test.case("different types are never equal")
+    test.assert(jpeval.value_equals(doc("1"), doc("\"1\"")) == false)
+
+    test.case("ordering is defined for two numbers and two strings, nothing else")
+    test.assert(jpeval.value_comparable(doc("1"), doc("2")))
+    test.assert(jpeval.value_comparable(doc("\"a\""), doc("\"b\"")))
+    test.assert(jpeval.value_comparable(doc("1"), doc("\"a\"")) == false)
+    test.assert(jpeval.value_comparable(doc("[1]"), doc("[2]")) == false)
+    test.assert(jpeval.value_order(doc("1"), doc("2")) == 0 - 1)
+    test.assert(jpeval.value_order(doc("1"), doc("\"a\"")) == 0)
+
+@test
+fn test_the_pattern_language_is_i_regexp_and_says_what_it_is_not() [io]
+    test.case("what RFC 9485 has")
+    test.assert(jpregex.is_iregexp("[0-9]{4}"))
+    test.assert(jpregex.is_iregexp("a|b"))
+    test.assert(jpregex.is_iregexp("a.*b"))
+
+    test.case("and what it does not, each named so a person can act on it")
+    test.assert(jpregex.unsupported_construct("(?i)abc") == Some("inline flag"))
+    test.assert(jpregex.unsupported_construct("(a)\\1") == Some("backreference"))
+    test.assert(jpregex.unsupported_construct("a(?=b)") == Some("lookahead"))
+    test.assert(jpregex.unsupported_construct("a+?") == Some("lazy quantifier"))
+    test.assert(jpregex.unsupported_construct("[0-9]+") == None)
+
+    test.case("a caret is an ordinary character here, not an anchor")
+    test.assert(jpregex.is_iregexp("^a"))
+
+    test.case("match is anchored and search is not")
+    match jpregex.compile("[0-9]+")
+        Err(_) =>
+            test.assert(false)
+        Ok(re) =>
+            test.assert(jpregex.is_match(re, "2026"))
+            test.assert(jpregex.is_match(re, "in 2026") == false)
+            test.assert(jpregex.search(re, "in 2026"))
+            test.assert(re.uses_categories == false)
+            test.assert(re.states > 0)
+
+    test.case("a category escape needs the lookup, and says so when it has none")
+    test.assert(jpregex.needs_categories("\\p{Lu}"))
+    test.assert(jpregex.needs_categories("[a-z]") == false)
+    match jpregex.compile("\\p{L}+")
+        Ok(_)  => test.assert(false)
+        Err(f) => test.assert(f.kind == JpNoCategoryLookup)
+
+    test.case("and compiles when the caller supplies one")
+    match jpregex.compile_with("\\p{L}+", lowercase_category)
+        Err(_) =>
+            test.assert(false)
+        Ok(re) =>
+            test.assert(re.uses_categories)
+            test.assert(jpregex.is_match(re, "ada"))
+
+    test.case("a pattern that is not I-Regexp is refused by name")
+    match jpregex.compile("(?i)a")
+        Ok(_)  => test.assert(false)
+        Err(f) => test.assert(f.kind == JpBadRegex)
+
+// A category lookup small enough to read: the ASCII lowercase letters
+// and nothing else.  A caller with unicode-nv passes the real one.
+fn lowercase_category(ch: Int) -> Str
+    if ch >= 97 and ch <= 122
+        "Ll"
+    else
+        "Cn"
+
+@test
+fn test_a_filter_can_be_given_the_category_lookup_it_needs() [io]
+    test.case("the plumbing reaches match() and search() from the evaluator")
+    match jpquery.parse("$[?match(@.n, '\\p{L}+')]")
+        Err(_) =>
+            test.assert(false)
+        Ok(q)  =>
+            let limits = jpeval.default_limits()
+            let src = doc("[{\"n\":\"ada\"},{\"n\":\"7\"}]")
+            let sel = jpeval.select_categorised(q, src, limits, lowercase_category)
+            test.assert(list.len(sel.nodes) == 1)
+
+    test.case("and without it that filter is false, which is section 2.4.6")
+    match jpquery.parse("$[?match(@.n, '\\p{L}+')]")
+        Err(_) =>
+            test.assert(false)
+        Ok(q)  =>
+            test.assert(list.len(jpeval.select(q, doc("[{\"n\":\"ada\"}]"))) == 0)

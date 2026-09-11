@@ -1,0 +1,137 @@
+// jperror.nv — the one fault type, and the offset in the QUERY it
+// happened at.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// EVERY FAULT IS A PARSE FAULT, and that is RFC 9535's doing rather
+// than a simplification.  § 2.1 requires a query to be checked before
+// it is run, and §§ 2.3.5.2.2 and 2.4 make every runtime disagreement
+// answer false rather than raise: comparing a string with a number is
+// false, `match()` with a pattern that is not I-Regexp is false, and a
+// selector that names nothing selects nothing.  So `jpquery.parse`
+// answers a `Result` and `jpeval.select` does not — which is the one
+// fact about this package a caller should learn first.
+//
+// The one thing that can stop an evaluation is a resource bound, and it
+// is not a fault either: `jpeval.select_with` answers a selection with
+// `truncated` set.  A query that ran out of budget produced real nodes
+// up to that point, and throwing them away to raise would be answering
+// less than is known.
+//
+// THE OFFSET IS INTO THE QUERY, never into the document.  A query is a
+// short string a person typed, and the useful message underlines the
+// character.
+
+// What was wrong with the query, named.
+//
+// ```novo
+// use jperror
+//
+// fn main() [io]
+//     println(jperror.kind_name(JpNotSingular))
+// ```
+pub enum JpFaultKind
+    // The query did not begin with `$`, or a filter's inner query did
+    // not begin with `@` or `$`.
+    JpNoRoot
+    // A segment that is neither `.name`, `.*`, `..` nor `[...]`.
+    JpBadSelector
+    // A member name that is not a valid shorthand and not a quoted
+    // string: a name starting with a digit, or a string with an escape
+    // RFC 9535 § 2.3.1.1 does not allow.
+    JpBadName
+    // An array index outside the interoperable range — RFC 9535 § 2.1
+    // bounds it at 2^53 - 1, because a JSON number is a double.
+    JpBadIndex
+    // A slice whose step is zero, or whose parts are not integers.
+    JpBadSlice
+    // A filter expression that does not parse: a dangling `&&`, an
+    // unclosed parenthesis, a comparison of two comparisons.
+    JpBadFilter
+    // A function name that is not one of the five RFC 9535 defines and
+    // was not registered.
+    JpUnknownFunction
+    // A function extension called with the wrong number of arguments.
+    JpWrongArity
+    // A function extension called with an argument of the wrong
+    // declared type — § 2.4.3's well-typedness rules, which are a
+    // PARSE-time check and the reason `length(@.*)` is refused rather
+    // than answered.
+    JpWrongArgumentType
+    // A query used where only a singular one may appear: as a
+    // comparison operand, or as a `ValueType` argument.  `@.*` and
+    // `@[?...]` are not singular; `@.a[0]` is.
+    JpNotSingular
+    // Characters after the end of a complete query.
+    JpTrailingInput
+    // The query ended inside a construct.
+    JpUnexpectedEnd
+    // A `\` escape in a quoted name or a string literal that RFC 9535
+    // § 2.3.1.1 does not define.
+    JpBadEscape
+    // A pattern that is not I-Regexp (RFC 9485).  Reported by
+    // `jpregex.compile`; NOT reported by `match()` or `search()`,
+    // which answer false for a bad pattern because RFC 9535 § 2.4.6
+    // says so.
+    JpBadRegex
+    // A `\p{...}` or `\P{...}` in a pattern compiled without the
+    // general-category lookup that resolves it.  See `jpregex`.
+    JpNoCategoryLookup
+
+// A fault: what, and where in the query.
+//
+// ```novo
+// use jperror
+//
+// fn main() [io]
+//     let f = jperror.fault(JpBadSlice, 7, 12)
+//     println("${f.at}")
+// ```
+pub struct JpFault
+    kind: JpFaultKind
+    // The byte offset into the query string.
+    at: Int
+    // One past the last byte of the construct that was wrong, so a
+    // message can underline it.
+    to: Int
+
+// A fault from its parts.
+//
+// ```novo
+// use jperror
+//
+// fn main() [io]
+//     println(jperror.kind_name(jperror.fault(JpNoRoot, 0, 1).kind))
+// ```
+pub fn fault(kind: JpFaultKind, at: Int, to: Int) -> JpFault []
+    todo("jsonpath-nv.jperror.fault")
+
+// The kind's name, in the spelling a message uses.
+//
+// Lower case with hyphens — `"not-singular"`, `"wrong-arity"` — and
+// stable across releases, because a program's own error text and its
+// test assertions quote them.
+//
+// ```novo
+// use jperror
+//
+// fn main() [io]
+//     println(jperror.kind_name(JpWrongArity))
+// ```
+pub fn kind_name(kind: JpFaultKind) -> Str []
+    todo("jsonpath-nv.jperror.kind_name")
+
+// One line about the fault, with the offset in it.
+//
+// It does not quote the query — this module never sees it — so a
+// message that underlines the offending characters is built by the
+// caller out of the range and its own copy of the text.
+//
+// ```novo
+// use jperror
+//
+// fn main() [io]
+//     println(jperror.message(jperror.fault(JpUnknownFunction, 3, 9)))
+// ```
+pub fn message(f: JpFault) -> Str []
+    todo("jsonpath-nv.jperror.message")

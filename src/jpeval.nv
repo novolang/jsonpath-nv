@@ -1,0 +1,433 @@
+// jpeval.nv — a query run against a document, answering nodes and the
+// normalized path of each one.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// EVALUATION CANNOT FAIL, which is the fact about this package a caller
+// should learn first and the reason nothing here answers a `Result`.
+// RFC 9535 makes every runtime disagreement produce a false or an empty
+// nodelist rather than an error: § 2.3.5.2.2 says comparing a string
+// with a number is false, § 2.4.6 says `match()` with a pattern that is
+// not I-Regexp is false, and a selector that names a member nothing has
+// selects nothing.  Everything that CAN be wrong is wrong in the query,
+// and `jpquery.parse` is where it is caught.
+//
+// The one thing that stops a walk is a resource bound, and that is not
+// a failure either: `select_with` answers a `JpSelection` with
+// `truncated` set and the nodes it found before it stopped.  A query
+// that ran out of budget produced real nodes, and discarding them to
+// raise would answer less than is known.
+//
+// THE VALUE IS THE STANDARD LIBRARY'S, NOT A SECOND ONE.  `JsonValueH`
+// is what `std.json.parse` answers, what `std.http`'s bodies arrive as
+// and what `nq` already walks — so a document is queried where it is,
+// with no conversion.  What that costs is written down in the README
+// under "What the standard library's JSON value cannot carry", and the
+// short version is that `{}` and `null` are the same value to every
+// accessor, which is the one place § 2.4.4's `length()` cannot be
+// answered correctly.
+//
+// EVERY NODE CARRIES ITS NORMALIZED PATH, § 2.7's: `$['a'][0]`, quoted
+// throughout, no shorthand.  It is the half of JSONPath that makes the
+// results usable rather than just visible — a program that selects
+// `$..price` and then wants to WRITE those locations needs to know
+// where each one was, and a bare list of values cannot say.  Building
+// it costs a string per node, so `select_values` is there for a caller
+// that does not want them.
+
+use std.json
+use jperror
+use jpquery
+
+// What a walk will not do.
+//
+// Bounds rather than a promise: `$..*` over a document a stranger
+// supplied is a query that visits every node, and a service accepting
+// queries from outside wants a ceiling it chose.
+pub struct JpLimits
+    // How deep into the document a descendant segment may go.
+    max_depth: Int
+    // How many nodes the result may hold before the walk stops.
+    max_nodes: Int
+    // How many nodes the walk may VISIT, which is the larger number
+    // and the one that bounds the cost: `$..[?@.a == 1]` visits
+    // everything and may select nothing.
+    max_visits: Int
+
+// One selected node: the value, and where it was.
+pub struct JpNode
+    value: JsonValueH
+    // The normalized path, RFC 9535 § 2.7: `$['store']['book'][0]`.
+    // Always quoted, never the shorthand, so that two paths to the same
+    // location are the same string.
+    path: Str
+
+// What a bounded walk produced.
+pub struct JpSelection
+    nodes: [JpNode]
+    // True when a bound in `JpLimits` stopped the walk.  The nodes
+    // above it are real; there may have been more.
+    truncated: Bool
+    // How many nodes the walk visited, whether or not it selected
+    // them.  What a caller tuning a limit reads.
+    visited: Int
+
+// Bounds no ordinary document reaches: 256 deep, 100,000 nodes
+// selected, a million visited.
+//
+// ```novo
+// use jpeval
+//
+// fn main() [io]
+//     println("${jpeval.default_limits().max_depth}")
+// ```
+pub fn default_limits() -> JpLimits []
+    todo("jsonpath-nv.jpeval.default_limits")
+
+// Run a query and answer every node it selected, in the order RFC 9535
+// produces them.
+//
+// **The load-bearing call of this module**, and it answers a list
+// rather than a `Result` because evaluation cannot fail.  The order is
+// the specification's: document order within a selector, selector
+// order within a segment, so `$[2,0]` answers the third element before
+// the first.
+//
+// ```novo
+// use std.json
+// use std.list
+// use jpeval
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse("$.a[*]")
+//         Err(_) =>
+//             println("did not parse")
+//         Ok(q)  =>
+//             match json.parse("{\"a\":[1,2,3]}")
+//                 None      => println("no document")
+//                 Some(doc) => println("${list.len(jpeval.select(q, doc))}")
+// ```
+pub fn select(q: jpquery.JpQuery, root: JsonValueH) -> [JpNode] []
+    todo("jsonpath-nv.jpeval.select")
+
+// Run a query under bounds the caller chose.
+//
+// What a service running somebody else's query calls.  The answer says
+// whether it finished.
+//
+// ```novo
+// use std.json
+// use jpeval
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse("$..*")
+//         Err(_) =>
+//             println("did not parse")
+//         Ok(q)  =>
+//             match json.parse("{\"a\":1}")
+//                 None      => println("no document")
+//                 Some(doc) =>
+//                     let sel = jpeval.select_with(q, doc, jpeval.default_limits())
+//                     println("${sel.truncated}")
+// ```
+pub fn select_with(q: jpquery.JpQuery, root: JsonValueH, limits: JpLimits) -> JpSelection []
+    todo("jsonpath-nv.jpeval.select_with")
+
+// The values alone, with no paths built.
+//
+// The cheap call: a normalized path is a string per node, and a caller
+// that is going to read the values and throw the locations away should
+// not pay for them.
+//
+// ```novo
+// use std.json
+// use std.list
+// use jpeval
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse("$.a")
+//         Err(_) =>
+//             println("did not parse")
+//         Ok(q)  =>
+//             match json.parse("{\"a\":1}")
+//                 None      => println("no document")
+//                 Some(doc) => println("${list.len(jpeval.select_values(q, doc))}")
+// ```
+pub fn select_values(q: jpquery.JpQuery, root: JsonValueH) -> [JsonValueH] []
+    todo("jsonpath-nv.jpeval.select_values")
+
+// The normalized paths alone, with no values kept.
+//
+// The other half: a tool that reports WHERE something is — a linter
+// over a configuration document, a diff that names the locations that
+// changed — wants the paths and already has the document.
+//
+// ```novo
+// use std.json
+// use std.list
+// use jpeval
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse("$..price")
+//         Err(_) =>
+//             println("did not parse")
+//         Ok(q)  =>
+//             match json.parse("{\"a\":{\"price\":1}}")
+//                 None      => println("no document")
+//                 Some(doc) => println("${list.len(jpeval.select_paths(q, doc))}")
+// ```
+pub fn select_paths(q: jpquery.JpQuery, root: JsonValueH) -> [Str] []
+    todo("jsonpath-nv.jpeval.select_paths")
+
+// The one value a singular query selects, or `None`.
+//
+// `None` for a query that matched nothing.  A query that is not
+// singular is refused at PARSE time by `jpquery.parse_singular`, so
+// this cannot be given one that might match several — which is why it
+// answers an option rather than a list and a first-of.
+//
+// ```novo
+// use std.json
+// use jpeval
+// use jpquery
+//
+// fn main() [io]
+//     match jpquery.parse_singular("$.a.b")
+//         Err(_) =>
+//             println("not a singular query")
+//         Ok(q)  =>
+//             match json.parse("{\"a\":{\"b\":7}}")
+//                 None      => println("no document")
+//                 Some(doc) =>
+//                     match jpeval.select_one(q, doc)
+//                         Some(v) => println(json.stringify(v))
+//                         None    => println("no match")
+// ```
+pub fn select_one(q: jpquery.JpQuery, root: JsonValueH) -> ?JsonValueH []
+    todo("jsonpath-nv.jpeval.select_one")
+
+// Parse and run in one call, for the caller who has a query as text.
+//
+// The only function in this module that can fail, and it fails at the
+// parse.
+//
+// ```novo
+// use std.json
+// use std.list
+// use jpeval
+//
+// fn main() [io]
+//     match json.parse("{\"a\":[1,2]}")
+//         None      =>
+//             println("no document")
+//         Some(doc) =>
+//             match jpeval.query(doc, "$.a[*]")
+//                 Err(f)    => println("${f.at}")
+//                 Ok(nodes) => println("${list.len(nodes)}")
+// ```
+pub fn query(root: JsonValueH, text: Str) -> Result<[JpNode], jperror.JpFault> []
+    todo("jsonpath-nv.jpeval.query")
+
+// Run a query whose filters use `\p{...}`, with the Unicode
+// general-category lookup those patterns need.
+//
+// The plumbing `jpregex.compile_with` describes, carried through the
+// evaluator: `match()` and `search()` compile their pattern at the
+// point they are called, so the lookup has to reach them from here.
+// A caller whose queries use no category escape never calls this, and a
+// caller whose query does and who calls `select` instead gets `false`
+// from that function — which is § 2.4.6's answer for a pattern that is
+// not valid I-Regexp, and an unresolvable `\p{...}` is not.
+//
+// ```novo
+// use std.json
+// use jpeval
+// use jpquery
+//
+// fn ascii_category(ch: Int) -> Str
+//     if ch >= 97 && ch <= 122
+//         "Ll"
+//     else
+//         "Cn"
+//
+// fn main() [io]
+//     match jpquery.parse("$[?match(@.n, '\\p{L}+')]")
+//         Err(_) =>
+//             println("did not parse")
+//         Ok(q)  =>
+//             match json.parse("[{\"n\":\"ada\"}]")
+//                 None      => println("no document")
+//                 Some(doc) =>
+//                     let limits = jpeval.default_limits()
+//                     let sel = jpeval.select_categorised(q, doc, limits, ascii_category)
+//                     println("${sel.visited}")
+// ```
+pub fn select_categorised(q: jpquery.JpQuery, root: JsonValueH, limits: JpLimits,
+                          category_of: fn(Int) -> Str) -> JpSelection []
+    todo("jsonpath-nv.jpeval.select_categorised")
+
+// One step of a normalized path.
+pub struct JpStep
+    // The member name, for a step into an object.
+    name: Str
+    // The element index, for a step into an array.
+    index: Int
+    // Which of the two this step is.
+    is_index: Bool
+
+// The normalized path of a location given as a list of steps.
+//
+// For a caller BUILDING a path rather than reading one — a program that
+// knows it wants `$['a'][0]` and would rather not spell the quoting
+// rules itself.  A step is a member name or an index, and
+// `is_index` says which.
+//
+// ```novo
+// use jpeval
+//
+// fn main() [io]
+//     let steps = [jpeval.name_step("a"), jpeval.index_step(0)]
+//     println(jpeval.normalized_path(steps))
+// ```
+pub fn normalized_path(steps: [JpStep]) -> Str []
+    todo("jsonpath-nv.jpeval.normalized_path")
+
+// A step into an object member.
+//
+// ```novo
+// use jpeval
+//
+// fn main() [io]
+//     println(jpeval.name_step("a").name)
+// ```
+pub fn name_step(name: Str) -> JpStep []
+    todo("jsonpath-nv.jpeval.name_step")
+
+// A step into an array element.
+//
+// ```novo
+// use jpeval
+//
+// fn main() [io]
+//     println("${jpeval.index_step(3).index}")
+// ```
+pub fn index_step(index: Int) -> JpStep []
+    todo("jsonpath-nv.jpeval.index_step")
+
+// A normalized path parsed back into its steps, or `None` when the
+// string is not one.
+//
+// The inverse, so a program that stored a path can walk to it again
+// without re-running the query that found it.
+//
+// ```novo
+// use std.list
+// use jpeval
+//
+// fn main() [io]
+//     match jpeval.path_steps("$['a'][0]")
+//         Some(steps) => println("${list.len(steps)}")
+//         None        => println("not a normalized path")
+// ```
+pub fn path_steps(path: Str) -> ?[JpStep] []
+    todo("jsonpath-nv.jpeval.path_steps")
+
+// The value at a normalized path, or `None`.
+//
+// Cheaper than running a query, because a normalized path is a walk
+// with no branching in it.  What a program does with a path it stored
+// earlier.
+//
+// ```novo
+// use std.json
+// use jpeval
+//
+// fn main() [io]
+//     match json.parse("{\"a\":[1,2]}")
+//         None      =>
+//             println("no document")
+//         Some(doc) =>
+//             match jpeval.at_path(doc, "$['a'][0]")
+//                 Some(v) => println(json.stringify(v))
+//                 None    => println("nothing there")
+// ```
+pub fn at_path(root: JsonValueH, path: Str) -> ?JsonValueH []
+    todo("jsonpath-nv.jpeval.at_path")
+
+// Compare two JSON values by RFC 9535 § 2.3.5.2.2.
+//
+// Structural: two arrays are equal when they have the same length and
+// equal members in order, two objects when they have the same member
+// names and equal values, and `1` and `1.0` are equal because they are
+// the same JSON number.  Nothing else is equal to anything of a
+// different type.
+//
+// Public because it is the one piece of RFC 9535 that a caller is
+// likely to want on its own — a test asserting that two documents mean
+// the same thing — and because the standard library has no
+// `json.equals` to defer to.  The README says what that costs.
+//
+// ```novo
+// use std.json
+// use jpeval
+//
+// fn main() [io]
+//     match json.parse("1")
+//         None    =>
+//             println("no document")
+//         Some(a) =>
+//             match json.parse("1.0")
+//                 None    => println("no document")
+//                 Some(b) => println("${jpeval.value_equals(a, b)}")
+// ```
+pub fn value_equals(a: JsonValueH, b: JsonValueH) -> Bool []
+    todo("jsonpath-nv.jpeval.value_equals")
+
+// Order two JSON values by RFC 9535 § 2.3.5.2.2's `<`.
+//
+// `-1`, `0` or `1`, and `0` ALSO for the incomparable pairs — a string
+// and a number, an array and anything — because the specification makes
+// `<` false in both directions for those rather than defining an order.
+// A caller that needs to know which of the two it got asks
+// `value_comparable` first.
+//
+// ```novo
+// use std.json
+// use jpeval
+//
+// fn main() [io]
+//     match json.parse("1")
+//         None    =>
+//             println("no document")
+//         Some(a) =>
+//             match json.parse("2")
+//                 None    => println("no document")
+//                 Some(b) => println("${jpeval.value_order(a, b)}")
+// ```
+pub fn value_order(a: JsonValueH, b: JsonValueH) -> Int []
+    todo("jsonpath-nv.jpeval.value_order")
+
+// Whether `<` is defined between these two values at all.
+//
+// True only for two numbers and for two strings, which is the whole of
+// § 2.3.5.2.2's ordering.
+//
+// ```novo
+// use std.json
+// use jpeval
+//
+// fn main() [io]
+//     match json.parse("1")
+//         None    =>
+//             println("no document")
+//         Some(a) =>
+//             match json.parse("\"x\"")
+//                 None    => println("no document")
+//                 Some(b) => println("${jpeval.value_comparable(a, b)}")
+// ```
+pub fn value_comparable(a: JsonValueH, b: JsonValueH) -> Bool []
+    todo("jsonpath-nv.jpeval.value_comparable")

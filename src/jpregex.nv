@@ -1,0 +1,178 @@
+// jpregex.nv — I-Regexp (RFC 9485), which is the only pattern language
+// `match()` and `search()` may use.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// WHY THIS IS HERE AND NOT `std.regex`.  I-Regexp is not "a small
+// regex"; it is a DIFFERENT LANGUAGE that happens to look like one, and
+// the difference is the point of RFC 9485.  It has no anchors — `^` and
+// `$` are ordinary characters — no backreferences, no lookaround, no
+// lazy quantifiers, no named groups and no capture semantics at all,
+// because every one of those is either unimplementable in an automaton
+// or specified differently by every engine that has it.  What is left
+// matches the same strings on every implementation, which is what makes
+// a JSONPath query portable.
+//
+// So accepting a `std.regex` pattern here would be worse than refusing
+// one: a query with `(?i)` or `\1` in it would work on this
+// implementation, and a service on the other side of the wire running a
+// conforming one would answer different nodes for the same query.  A
+// pattern outside I-Regexp is `JpBadRegex`, by name.
+//
+// `\p{...}` IS IN THE LANGUAGE, AND THE TABLE IS NOT.  RFC 9485 § 2's
+// grammar includes the category escapes, which need Unicode's general
+// categories — a quarter of a megabyte of table that a caller selecting
+// `$.store.book[0].title` should not carry.  So `compile` refuses a
+// pattern that uses one, with `JpNoCategoryLookup`, and `compile_with`
+// takes the lookup as a function the caller supplies.  A caller that
+// already depends on unicode-nv passes its own; one that does not gets
+// a named refusal rather than a pattern that quietly matches nothing.
+// That is `docs/publishing.md` § How a `core` package takes a stream
+// from its host, applied to a table instead of to a stream.
+//
+// MATCHING IS ANCHORED OR IT IS NOT, AND THAT IS THE WHOLE DIFFERENCE
+// between the two RFC 9535 functions: `match()` requires the pattern to
+// match the ENTIRE string and `search()` any substring.  One compiled
+// pattern answers both, so a caller that needs both pays for one
+// compile.
+
+use jperror
+
+// A compiled pattern.
+//
+// Opaque on purpose: the representation is an automaton and nothing
+// outside this module should match on it.  It holds no reference to the
+// pattern string, so a caller may drop that.
+pub struct JpRegex
+    // The number of states the automaton has.  Public because it is the
+    // one thing a caller bounding an untrusted pattern wants — a
+    // pattern is cheap to write and `(a|b){1,1000}` is not — and
+    // because it is a number rather than a structure.
+    states: Int
+    // Whether the pattern uses a category escape, and so whether it
+    // needed the lookup.
+    uses_categories: Bool
+
+// Compile a pattern, refusing one that needs the Unicode categories.
+//
+// Everything RFC 9485 defines except `\p{...}` and `\P{...}`: literal
+// characters, `.`, `[...]` character classes with ranges and the
+// single-character escapes, `|`, `?`, `*`, `+`, `{n,m}`, and grouping.
+//
+// ```novo
+// use jpregex
+//
+// fn main() [io]
+//     match jpregex.compile("[0-9]{4}-[0-9]{2}")
+//         Ok(_)  => println("compiled")
+//         Err(f) => println("${f.at}")
+// ```
+pub fn compile(pattern: Str) -> Result<JpRegex, jperror.JpFault> []
+    todo("jsonpath-nv.jpregex.compile")
+
+// Compile a pattern, resolving `\p{...}` through a lookup the caller
+// supplies.
+//
+// `category_of` answers a code point's Unicode general category as its
+// two-letter abbreviation — `"Lu"`, `"Nd"`, `"Zs"` — which is what
+// unicode-nv's `uclass.category_abbrev(uclass.category(data, ch))`
+// composes to.  A one-letter escape like `\p{L}` matches every category
+// whose abbreviation starts with that letter, which is XSD's rule and
+// RFC 9485's by reference.
+//
+// ```novo
+// use jpregex
+//
+// fn ascii_category(ch: Int) -> Str
+//     if ch >= 97 && ch <= 122
+//         "Ll"
+//     else
+//         "Cn"
+//
+// fn main() [io]
+//     match jpregex.compile_with("\\p{L}+", ascii_category)
+//         Ok(_)  => println("compiled")
+//         Err(f) => println("${f.at}")
+// ```
+pub fn compile_with(pattern: Str,
+                    category_of: fn(Int) -> Str) -> Result<JpRegex, jperror.JpFault> []
+    todo("jsonpath-nv.jpregex.compile_with")
+
+// Whether the whole string matches — RFC 9535's `match()`.
+//
+// ```novo
+// use jpregex
+//
+// fn main() [io]
+//     match jpregex.compile("[0-9]+")
+//         Err(_) => println("did not compile")
+//         Ok(re) =>
+//             let hit = jpregex.is_match(re, "2026")
+//             println("${hit}")
+// ```
+pub fn is_match(re: JpRegex, text: Str) -> Bool []
+    todo("jsonpath-nv.jpregex.is_match")
+
+// Whether any substring matches — RFC 9535's `search()`.
+//
+// ```novo
+// use jpregex
+//
+// fn main() [io]
+//     match jpregex.compile("[0-9]+")
+//         Err(_) => println("did not compile")
+//         Ok(re) =>
+//             let hit = jpregex.search(re, "in 2026 it did")
+//             println("${hit}")
+// ```
+pub fn search(re: JpRegex, text: Str) -> Bool []
+    todo("jsonpath-nv.jpregex.search")
+
+// Whether a pattern is I-Regexp at all, without compiling it.
+//
+// The check a tool validating somebody's query makes, and the one a
+// caller makes before deciding whether it needs `compile_with`.
+//
+// ```novo
+// use jpregex
+//
+// fn main() [io]
+//     let ok = jpregex.is_iregexp("a|b")
+//     println("${ok}")
+// ```
+pub fn is_iregexp(pattern: Str) -> Bool []
+    todo("jsonpath-nv.jpregex.is_iregexp")
+
+// Whether a pattern uses a category escape, and so needs the lookup.
+//
+// ```novo
+// use jpregex
+//
+// fn main() [io]
+//     let needs = jpregex.needs_categories("\\p{Lu}")
+//     println("${needs}")
+// ```
+pub fn needs_categories(pattern: Str) -> Bool []
+    todo("jsonpath-nv.jpregex.needs_categories")
+
+// The construct in a pattern that I-Regexp does not have, if any.
+//
+// A `?Str` naming it — `"backreference"`, `"lookahead"`,
+// `"lazy quantifier"`, `"anchor"`, `"inline flag"` — so that a tool
+// rejecting a query can tell the person WHY their pattern, which works
+// in every other language they use, is not one here.  `None` for a
+// pattern that is I-Regexp.
+//
+// It is the difference between a library that says "invalid regex" and
+// one that says "I-Regexp has no `(?i)`; fold the case in the character
+// class instead", and the second is the only one worth shipping for a
+// language nobody has used before.
+//
+// ```novo
+// use jpregex
+//
+// fn main() [io]
+//     println(jpregex.unsupported_construct("(?i)abc") ?? "it is I-Regexp")
+// ```
+pub fn unsupported_construct(pattern: Str) -> ?Str []
+    todo("jsonpath-nv.jpregex.unsupported_construct")
