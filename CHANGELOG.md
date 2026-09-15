@@ -4,6 +4,10 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.0.2 — 2026-09-15
+
+README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
+
 ## 0.0.1 — 2026-09-11
 
 The **interface**, before anyone implements it.  Every signature, every
@@ -63,3 +67,23 @@ The oracle is the JSONPath Compliance Test Suite;
 `tests/jpeval_tests.nv` quotes RFC 9535 § 1.5's own bookstore table so a
 reviewer can check the port against the specification rather than
 against this package.
+
+### Design notes
+
+What `orbit/nq` would take from this package, which the 0.0.1 README
+set out and this one no longer does. nq keeps its command line, its
+pipes, its renderers, and jq's own rules where they differ from
+JSONPath's: a missing field is `null` rather than nothing, indexing a
+non-container is an error, and `keys` answers an object's names
+sorted. It would replace `src/query.nv`'s hand-written parser with
+`jpquery.parse` and the typed query, gaining filters, slices,
+descendant segments and the function extensions; the walk half of
+`src/eval.nv` with `jpeval.select`; its own `cmp_arr`, `cmp_obj` and
+`cmp_float` with `jpeval.value_equals` and `value_order`; and its
+`eval.kind` with the same six-way question over `std.json` that the
+filing above closes for both. Putting `jpregex` behind `~=` in place
+of `std.regex` would be a narrowing rather than an upgrade, because
+`~=` accepts PCRE today and I-Regexp has no `(?i)`, so it is nq's
+owner's decision. The pipe stays nq's: a jq program is a sequence of
+stages over a stream, and a JSONPath query is one selection, so the
+shape is a query as the path inside a stage.
