@@ -6,7 +6,14 @@ consumer deciding whether to upgrade can read.
 
 ## 0.0.2 — 2026-09-15
 
-README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
+README rewritten to the package README style guide (docs/writing-a-readme.md).
+
+`JpFault` now declares the `impl Error` its own `Result` positions
+require.  `Result<T, E>` has carried the bound `E: Error` since SPEC
+§ 3.4, and the compiler enforced it only when `E` was declared in the
+module that named it — so `Result<_, jperror.JpFault>` was accepted
+across modules with no impl anywhere.  The impl is the signature this
+package always meant; nothing else about the interface changed.
 
 ## 0.0.1 — 2026-09-11
 

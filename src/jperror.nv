@@ -95,6 +95,18 @@ pub struct JpFault
     // message can underline it.
     to: Int
 
+// `JpFault` is an `Error`, which is what lets
+// `Result<T, JpFault>` exist at all — `jpquery.parse`,
+// `jpquery.parse_singular`, `jpregex.compile` and `jpeval.query` all
+// answer with one.
+impl Error for JpFault
+    // The one-line message: `jperror.message`'s sentence, the kind's
+    // name with the offset in the query it happened at.
+    //
+    // Panics with `not implemented` until the bodies land.
+    fn message(self) -> Str
+        todo("jsonpath-nv.JpFault.message")
+
 // A fault from its parts.
 //
 // ```novo
