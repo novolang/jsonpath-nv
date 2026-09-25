@@ -46,13 +46,13 @@ use jpquery
 // queries from outside wants a ceiling it chose.
 pub struct JpLimits
     // How deep into the document a descendant segment may go.
-    max_depth: Int
+    var max_depth: Int
     // How many nodes the result may hold before the walk stops.
-    max_nodes: Int
+    var max_nodes: Int
     // How many nodes the walk may VISIT, which is the larger number
     // and the one that bounds the cost: `$..[?@.a == 1]` visits
     // everything and may select nothing.
-    max_visits: Int
+    var max_visits: Int
 
 // One selected node: the value, and where it was.
 pub struct JpNode

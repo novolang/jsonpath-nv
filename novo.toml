@@ -1,6 +1,6 @@
 [package]
 name        = "jsonpath-nv"
-version     = "0.0.2"
+version     = "0.0.3"
 description = "RFC 9535 JSONPath over the standard library's JSON value: the whole grammar as a typed query including filter expressions, the well-typedness rules of section 2.4.3 checked at parse time, a total evaluator answering a node list with normalized paths, the five function extensions, and the I-Regexp subset match() and search() need.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
