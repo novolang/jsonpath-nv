@@ -1,37 +1,26 @@
 // jpquery.nv — a JSONPath query as a typed value, and the parse that
 // produces one.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// The types are RFC 9535's and carry its names.  `JpSegment` is section
+// 2.5's segment, `JpSelector` is section 2.3's selector with its five
+// kinds in the specification's order, and `JpExpr` is section 2.3.5's
+// logical expression.  The grammar is mutually recursive, since a filter
+// selector holds an expression and an expression holds a query, so the
+// whole of it is in this module.
 //
-// THE WHOLE GRAMMAR IS IN ONE MODULE, filter expressions included, and
-// the reason is that RFC 9535's grammar is mutually recursive: a filter
-// SELECTOR holds an expression, and an expression holds a QUERY, which
-// holds segments, which hold selectors.  Splitting it would need two
-// modules that referred to each other, and novo-lang module imports do
-// not describe a cycle.  Evaluation is where the split belongs and
-// `jpeval` is that module.
-//
-// THE TYPES ARE RFC 9535's OWN, NAMED THE SAME.  `JpSegment` is § 2.5's
-// segment, `JpSelector` is § 2.3's selector with its five arms in the
-// specification's order, `JpExpr` is § 2.3.5's logical expression.  A
-// reader with the RFC open should be able to point at each one.  That
-// is also why nothing here is flattened for convenience: a "path" of
-// strings would be a different language.
-//
-// WELL-TYPEDNESS IS CHECKED AT PARSE TIME, which is § 2.4.3 and the
-// part implementations skip.  `length(@.*)` is not a query that answers
-// nothing; it is not a query.  `@.*` is a `NodesType` and `length`
-// takes a `ValueType`, and the only nodes-to-value conversion the RFC
-// allows is a singular query used directly.  Refusing it here means a
-// caller finds out when it compiles the query rather than when a
-// document happens to have two matching members.
+// The parse checks the well-typedness rules of section 2.4.3.  A
+// function's arguments must have the types its parameters declare, a
+// comparison's operands must be values, and a query standing as a value
+// must be singular.  `length(@.*)` is therefore refused as a query
+// rather than answered with nothing.
 
+use std.list
+use std.str
 use jperror
 
-// The largest array index a query may name.
-//
-// RFC 9535 § 2.1 bounds it at 2^53 - 1, because a JSON number is an
-// IEEE double and an index beyond that cannot be written exactly.
+// The largest array index a query may name: 2^53 - 1 (RFC 9535 section
+// 2.1).  An index is a JSON number, and a double holds every integer up
+// to this one exactly.
 pub const MAX_INDEX = 9007199254740991
 
 // A whole query: where it starts, and the segments that follow.
@@ -45,28 +34,24 @@ pub const MAX_INDEX = 9007199254740991
 //         Ok(q)   => println("${q.absolute}")
 // ```
 pub struct JpQuery
-    // True for a query rooted at `$`, false for one rooted at `@` —
-    // which is only legal inside a filter, where `@` is the current
-    // node.  A `$` inside a filter is legal too and means the document
-    // root, which is how a filter compares a member against a value
-    // from somewhere else in the document.
+    // True for a query rooted at `$`, the document's root.  False for
+    // one rooted at `@`, the current node, which stands only inside a
+    // filter.
     absolute: Bool
     segments: [JpSegment]
 
-// One segment: child or descendant, and what it selects.
+// One segment: child or descendant, and its selectors.
 //
-// Both arms hold a LIST of selectors because `[0, 'a', 1:2]` is one
-// segment with three, and its result is their results concatenated in
-// selector order — not in document order, which is the detail that
-// makes `$[2,0]` answer the third element before the first.
+// A segment's result is its selectors' results in selector order, so
+// `$[2,0]` answers the third element before the first.
 pub enum JpSegment
-    // `.name`, `.*`, `[...]` — the children of each input node.
+    // `.name`, `.*`, `[...]`: the children of each input node.
     JpChildSeg(selectors: [JpSelector])
-    // `..name`, `..*`, `..[...]` — each input node and all of its
-    // descendants, visited in document order.
+    // `..name`, `..*`, `..[...]`: each input node and all of its
+    // descendants, in document order.
     JpDescendantSeg(selectors: [JpSelector])
 
-// One selector.  Five arms, in RFC 9535 § 2.3's own order.
+// One selector, in RFC 9535 section 2.3's order.
 pub enum JpSelector
     // `'name'` or the `.name` shorthand: one member of an object.
     JpNameSel(name: Str)
@@ -75,51 +60,39 @@ pub enum JpSelector
     // `0`, `-1`: one element of an array, counted from the end when
     // negative.
     JpIndexSel(index: Int)
-    // `1:5:2`: a range of elements, with Python's semantics and
-    // Python's clamping.
+    // `1:5:2`: a range of elements (section 2.3.4).
     JpSliceSel(bounds: JpSlice)
     // `?<expr>`: the children for which the expression is true.
     JpFilterSel(expr: JpExpr)
 
-// A slice's three parts, each absent or present.
+// A slice's three parts, each present or absent.
 //
-// `?Int` rather than a default, because the defaults DEPEND ON THE
-// STEP's sign: `[::-1]` starts at the end and `[::1]` starts at the
-// beginning, so an absent start is not zero, it is absent.  Collapsing
-// them at parse time would make `[::-1]` reverse nothing.
+// An absent start or end has a default that depends on the step's
+// sign, so absence is kept as it was written.
 pub struct JpSlice
     start: ?Int
     end: ?Int
-    // Absent means 1.  Zero is `JpBadSlice`: RFC 9535 § 2.3.4.2.2
-    // says a step of zero selects nothing, and a query that can only
-    // select nothing is one a caller wants told about.
+    // Absent means 1.  A step of zero selects nothing (RFC 9535
+    // section 2.3.4.2.2).
     step: ?Int
 
 // A logical expression inside a filter.
-//
-// Directly recursive, which is what the grammar is.  `JpExprTest` is
-// the existence test — a bare query inside a filter is true when it
-// selects at least one node — and it is also how a function returning
-// `LogicalType` appears, through `JpExprCall`.
 pub enum JpExpr
-    // `a || b`.  Short-circuiting is unobservable here because nothing
-    // in the grammar has an effect, so the order is not specified.
+    // `a || b`.
     JpExprOr(left: JpExpr, right: JpExpr)
     // `a && b`.
     JpExprAnd(left: JpExpr, right: JpExpr)
     // `!a`.
     JpExprNot(inner: JpExpr)
-    // A bare query: true when it selects at least one node.  `@.a` is
-    // "has a member a", and `@.a[?@.b]` is "has an a with a b in it".
+    // A bare query: true when it selects at least one node.
     JpExprTest(query: JpQuery)
-    // `a == b`, `a < b`, and the other four.
+    // `a == b` and the other five comparisons.
     JpExprCompare(left: JpOperand, op: JpCompareOp, right: JpOperand)
-    // A call to a function whose declared result is `LogicalType` —
-    // `match()` and `search()` of the five RFC 9535 defines.  A call to
-    // a `ValueType` function in this position is `JpWrongArgumentType`.
+    // A call to a function whose result is a logical value, such as
+    // `match()` and `search()`.
     JpExprCall(call: JpCall)
 
-// The six comparison operators, in RFC 9535 § 2.3.5.2.1's order.
+// The six comparison operators, in RFC 9535 section 2.3.5.1's order.
 pub enum JpCompareOp
     JpOpEq
     JpOpNe
@@ -128,65 +101,49 @@ pub enum JpCompareOp
     JpOpGt
     JpOpGe
 
-// What may stand on either side of a comparison.
-//
-// A query here must be SINGULAR — only names and indices, no wildcard,
-// no slice, no filter — because a comparison compares one value with
-// one value and a nodelist is not a value.  `jpquery.parse` refuses a
-// non-singular one with `JpNotSingular` rather than picking the first
-// node, which is what a reader coming from a lenient implementation
-// will expect it to do.
+// What may stand on either side of a comparison: a literal, a singular
+// query, or a call to a function whose result is a value.
 pub enum JpOperand
     JpOperandLiteral(literal: JpLiteral)
     JpOperandQuery(query: JpQuery)
     JpOperandCall(call: JpCall)
 
-// A literal in a filter.  RFC 9535 has no object or array literals, so
-// the six arms are all there are.
+// A literal in a filter.  RFC 9535 has no object or array literals.
 pub enum JpLiteral
     JpLitStr(value: Str)
-    // A JSON number with no fraction and no exponent that fits 64 bits.
+    // A number written with no fraction and no exponent that fits in
+    // 64 bits.
     JpLitInt(value: Int)
-    // Every other JSON number.  Kept apart from `JpLitInt` because the
-    // spelling is what decides which one a literal is, and merged again
-    // at comparison time because § 2.3.5.2.2 says `1` and `1.0` are
-    // equal.
+    // Every other number.  `1` and `1.0` compare equal all the same
+    // (section 2.3.5.2.2).
     JpLitFloat(value: Float)
     JpLitTrue
     JpLitFalse
     JpLitNull
 
-// The five function extensions RFC 9535 defines.
-//
-// An enum rather than a string, because the set is closed in the
-// specification and because the arity and the argument types below are
-// a table over exactly these five.  A caller with its own extension
-// registers it with `jpeval`; the parse of a name it does not know is
-// `JpUnknownFunction`.
+// The five function extensions RFC 9535 section 2.4 defines.
 pub enum JpFunction
-    // `length(ValueType) -> ValueType`.  Members of an object,
-    // characters of a string, elements of an array; **Nothing** for
-    // anything else, which is the arm this package cannot answer today
-    // — see the README.
+    // `length(ValueType) -> ValueType`: the characters of a string, the
+    // members of an object or the elements of an array.
     JpFnLength
-    // `count(NodesType) -> ValueType`.  How many nodes the argument
+    // `count(NodesType) -> ValueType`: how many nodes the argument
     // selected.
     JpFnCount
-    // `match(ValueType, ValueType) -> LogicalType`.  The whole string
+    // `match(ValueType, ValueType) -> LogicalType`: the whole string
     // matches the I-Regexp pattern.
     JpFnMatch
-    // `search(ValueType, ValueType) -> LogicalType`.  Some substring
-    // matches.
+    // `search(ValueType, ValueType) -> LogicalType`: some substring
+    // matches the pattern.
     JpFnSearch
-    // `value(NodesType) -> ValueType`.  The one node's value when the
-    // argument selected exactly one, Nothing otherwise.
+    // `value(NodesType) -> ValueType`: the one node's value when the
+    // argument selected exactly one.
     JpFnValue
 
-// The three types § 2.4.1 gives a function's arguments and result.
+// The three types of section 2.4.1.
 pub enum JpArgType
     // A JSON value, or Nothing.
     JpTypeValue
-    // True or false.  Not a JSON value: `LogicalTrue` is not `true`.
+    // True or false, which is not the JSON `true` or `false`.
     JpTypeLogical
     // A nodelist.
     JpTypeNodes
@@ -194,12 +151,11 @@ pub enum JpArgType
 // One argument of a call.
 pub enum JpArgument
     JpArgLiteral(literal: JpLiteral)
-    // A query.  Whether it is `ValueType` or `NodesType` depends on the
-    // parameter it is passed to and on whether it is singular, which is
-    // § 2.4.3 and what `check_types` decides.
+    // A query.  It is a value when its parameter is a value and it is
+    // singular, and a nodelist when its parameter is a nodelist.
     JpArgQuery(query: JpQuery)
     JpArgCall(call: JpCall)
-    // A logical expression, for a parameter declared `LogicalType`.
+    // A logical expression, for a parameter of logical type.
     JpArgLogical(expr: JpExpr)
 
 // A call to a function extension.
@@ -209,10 +165,8 @@ pub struct JpCall
 
 // Parse a query.
 //
-// **The load-bearing call of this module.**  A string a person typed in
-// and a typed value out, or the offset of the first thing that was not
-// RFC 9535.  The well-typedness rules of § 2.4.3 are checked here, so a
-// query that parses is a query that runs.
+// A query that parses is well typed (section 2.4.3), so every query
+// this answers can be run.  A fault's range is into `query`.
 //
 // ```novo
 // use std.list
@@ -224,14 +178,16 @@ pub struct JpCall
 //         Ok(q)  => println("${list.len(q.segments)}")
 // ```
 pub fn parse(query: Str) -> Result<JpQuery, jperror.JpFault> []
-    todo("jsonpath-nv.jpquery.parse")
+    var p = Parser { text: query, pos: 0 }
+    if peek(p) != '$'
+        return Err(jperror.fault(JpNoRoot, 0, min_int(1, str.len(query))))
+    let q = query_at(p)!
+    if p.pos < str.len(query)
+        return Err(jperror.fault(JpTrailingInput, p.pos, str.len(query)))
+    Ok(q)
 
-// Parse a query that is required to be singular.
-//
-// The convenience for a caller that is going to ask for one value:
-// `jpeval.select_one` over a non-singular query would have to decide
-// what "the" value of three nodes is, and refusing at parse time is
-// the answer that does not have to.
+// Parse a query that must be singular, refusing any other with
+// `JpNotSingular`.
 //
 // ```novo
 // use jpquery
@@ -242,14 +198,13 @@ pub fn parse(query: Str) -> Result<JpQuery, jperror.JpFault> []
 //         Ok(q)  => println("${jpquery.is_singular(q)}")
 // ```
 pub fn parse_singular(query: Str) -> Result<JpQuery, jperror.JpFault> []
-    todo("jsonpath-nv.jpquery.parse_singular")
+    let q = parse(query)!
+    if not is_singular(q)
+        return Err(jperror.fault(JpNotSingular, 0, str.len(query)))
+    Ok(q)
 
 // Whether a query is singular: every segment a child segment with one
-// selector, and that selector a name or an index.
-//
-// § 2.3.5.2.1's rule, public because it is what decides whether a query
-// may be a comparison operand and a caller building a query in code
-// needs the same answer the parser uses.
+// selector, and that selector a name or an index (section 2.3.5.1).
 //
 // ```novo
 // use jpquery
@@ -260,14 +215,32 @@ pub fn parse_singular(query: Str) -> Result<JpQuery, jperror.JpFault> []
 //         Ok(q)  => println("${jpquery.is_singular(q)}")
 // ```
 pub fn is_singular(q: JpQuery) -> Bool []
-    todo("jsonpath-nv.jpquery.is_singular")
+    for seg in q.segments
+        if not singular_segment(seg)
+            return false
+    true
 
-// The query rendered back as text, in RFC 9535's canonical spelling.
+// Whether a segment is a child segment with one name or index selector.
+fn singular_segment(seg: JpSegment) -> Bool
+    match seg
+        JpDescendantSeg(_) => false
+        JpChildSeg(sels)   => list.len(sels) == 1 and names_one(sels[0])
+
+// Whether a selector names one child: a name or an index.
+fn names_one(sel: JpSelector) -> Bool
+    match sel
+        JpNameSel(_)  => true
+        JpIndexSel(_) => true
+        _             => false
+
+// The query written out in one spelling: every name as a string
+// literal in brackets, `$['store']['book'][0]`.
 //
-// Quoted names throughout, no shorthand: `$['store']['book'][0]`.  Not
-// the text that was parsed — a round trip through this is a
-// normalisation, which is what makes two queries that mean the same
-// thing comparable as strings.
+// Two queries that differ only in shorthand, quoting or spacing render
+// to the same text, and the text parses back to the same query.
+// Selectors in one segment are joined with `,`, a descendant segment is
+// `..[...]`, and a filter's binary expressions are parenthesised where
+// the precedence of `&&` over `||` would otherwise change them.
 //
 // ```novo
 // use jpquery
@@ -278,7 +251,17 @@ pub fn is_singular(q: JpQuery) -> Bool []
 //         Ok(q)  => println(jpquery.render(q))
 // ```
 pub fn render(q: JpQuery) -> Str []
-    todo("jsonpath-nv.jpquery.render")
+    var out = if q.absolute
+        "$"
+    else
+        "@"
+    for seg in q.segments
+        match seg
+            JpChildSeg(sels)      =>
+                out = out + "[" + render_selectors(sels) + "]"
+            JpDescendantSeg(sels) =>
+                out = out + "..[" + render_selectors(sels) + "]"
+    out
 
 // The function's name as RFC 9535 spells it.
 //
@@ -289,7 +272,12 @@ pub fn render(q: JpQuery) -> Str []
 //     println(jpquery.function_name(JpFnLength))
 // ```
 pub fn function_name(f: JpFunction) -> Str []
-    todo("jsonpath-nv.jpquery.function_name")
+    match f
+        JpFnLength => "length"
+        JpFnCount  => "count"
+        JpFnMatch  => "match"
+        JpFnSearch => "search"
+        JpFnValue  => "value"
 
 // The function a name denotes, or `None`.
 //
@@ -302,13 +290,19 @@ pub fn function_name(f: JpFunction) -> Str []
 //         None    => println("not one of the five")
 // ```
 pub fn function_named(name: Str) -> ?JpFunction []
-    todo("jsonpath-nv.jpquery.function_named")
+    if name == "length"
+        return Some(JpFnLength)
+    if name == "count"
+        return Some(JpFnCount)
+    if name == "match"
+        return Some(JpFnMatch)
+    if name == "search"
+        return Some(JpFnSearch)
+    if name == "value"
+        return Some(JpFnValue)
+    None
 
 // The declared types of a function's parameters, in order.
-//
-// § 2.4.2's table, as data rather than as prose, so that
-// `check_types` and a caller registering its own extension read the
-// same rule.
 //
 // ```novo
 // use std.list
@@ -318,7 +312,12 @@ pub fn function_named(name: Str) -> ?JpFunction []
 //     println("${list.len(jpquery.parameter_types(JpFnMatch))}")
 // ```
 pub fn parameter_types(f: JpFunction) -> [JpArgType] []
-    todo("jsonpath-nv.jpquery.parameter_types")
+    match f
+        JpFnLength => [JpTypeValue]
+        JpFnCount  => [JpTypeNodes]
+        JpFnMatch  => [JpTypeValue, JpTypeValue]
+        JpFnSearch => [JpTypeValue, JpTypeValue]
+        JpFnValue  => [JpTypeNodes]
 
 // The declared type of a function's result.
 //
@@ -329,14 +328,20 @@ pub fn parameter_types(f: JpFunction) -> [JpArgType] []
 //     println("${jpquery.result_type(JpFnCount) == JpTypeValue}")
 // ```
 pub fn result_type(f: JpFunction) -> JpArgType []
-    todo("jsonpath-nv.jpquery.result_type")
+    match f
+        JpFnMatch  => JpTypeLogical
+        JpFnSearch => JpTypeLogical
+        _          => JpTypeValue
 
-// Check § 2.4.3's well-typedness rules over a parsed query, and answer
-// the first violation.
+// Check a query's well-typedness and its numbers, and answer the first
+// violation.
 //
-// `parse` already calls it; this is public so that a caller BUILDING a
-// query in code — a query compiler, a UI that assembles filters — can
-// check one it never wrote as text.
+// `parse` checks the same rules as it reads, with the fault's range in
+// the text.  This is for a query built in code, which has no text, so
+// its fault's range is empty at 0.  It checks each function's arity and
+// argument types, that a comparison's operands are values and a
+// query standing as a value is singular, that a call standing as a test
+// has a logical result, and that indices are within `MAX_INDEX`.
 //
 // ```novo
 // use jpquery
@@ -350,12 +355,12 @@ pub fn result_type(f: JpFunction) -> JpArgType []
 //                 None    => println("well typed")
 // ```
 pub fn check_types(q: JpQuery) -> ?jperror.JpFault []
-    todo("jsonpath-nv.jpquery.check_types")
+    let k = query_fault(q)
+    match k
+        Some(kind) => Some(jperror.fault(kind, 0, 0))
+        None       => None
 
-// How many segments deep a query is, descendant segments included.
-//
-// What a caller bounding an untrusted query reads before it runs one:
-// a query is cheap to parse and a `..` over a large document is not.
+// How many segments a query has, descendant segments included.
 //
 // ```novo
 // use jpquery
@@ -366,13 +371,12 @@ pub fn check_types(q: JpQuery) -> ?jperror.JpFault []
 //         Ok(q)  => println("${jpquery.depth(q)}")
 // ```
 pub fn depth(q: JpQuery) -> Int []
-    todo("jsonpath-nv.jpquery.depth")
+    list.len(q.segments)
 
-// Whether a query contains a descendant segment.
+// Whether a query has a descendant segment.
 //
-// The other half of the same question: `$..*` is the query that walks
-// the whole document, and a service accepting queries from outside may
-// want to refuse it before it runs it rather than bound it afterwards.
+// `$..*` visits every node of a document, and a service that runs
+// queries from outside may refuse such a query before it runs it.
 //
 // ```novo
 // use jpquery
@@ -383,4 +387,764 @@ pub fn depth(q: JpQuery) -> Int []
 //         Ok(q)  => println("${jpquery.has_descendant(q)}")
 // ```
 pub fn has_descendant(q: JpQuery) -> Bool []
-    todo("jsonpath-nv.jpquery.has_descendant")
+    for seg in q.segments
+        match seg
+            JpDescendantSeg(_) =>
+                return true
+            JpChildSeg(_)      => ()
+    false
+
+// ── The parser ───────────────────────────────────────────────────────
+
+// The text and the offset of the next byte to read.
+struct Parser
+    text: Str
+    var pos: Int
+
+// The byte at the parser's position, or -1 at the end.
+fn peek(p: Parser) -> Int
+    str.byte_at_or(p.text, p.pos, 0 - 1)
+
+// The byte `k` past the parser's position, or -1.
+fn peek_at(p: Parser, k: Int) -> Int
+    str.byte_at_or(p.text, p.pos + k, 0 - 1)
+
+// The smaller of two integers.
+fn min_int(a: Int, b: Int) -> Int
+    if a < b
+        return a
+    b
+
+// Skip RFC 9535's blank space: space, tab, line feed and carriage
+// return.
+fn skip_s(var p: Parser)
+    for _ in p.pos..str.len(p.text)
+        let b = peek(p)
+        if b != ' ' and b != '\t' and b != '\n' and b != '\r'
+            return
+        p.pos = p.pos + 1
+
+// A fault at the parser's position: `JpUnexpectedEnd` at the end of
+// the text, `kind` otherwise, covering one byte.
+fn fault_here(p: Parser, kind: jperror.JpFaultKind) -> jperror.JpFault
+    if p.pos >= str.len(p.text)
+        return jperror.fault(JpUnexpectedEnd, p.pos, p.pos)
+    jperror.fault(kind, p.pos, p.pos + 1)
+
+// Whether a byte is an ASCII digit.
+fn is_digit(b: Int) -> Bool
+    b >= '0' and b <= '9'
+
+// Whether a byte may begin a member-name shorthand: a letter, `_`, or
+// any byte of a non-ASCII character.
+fn name_first(b: Int) -> Bool
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z' or b == '_' or b >= 128
+
+// A query at the parser's position, which holds `$` or `@`.
+fn query_at(var p: Parser) -> Result<JpQuery, jperror.JpFault>
+    let absolute = peek(p) == '$'
+    p.pos = p.pos + 1
+    var segs: [JpSegment] = []
+    for _ in p.pos..str.len(p.text) + 1
+        let before = p.pos
+        skip_s(p)
+        let b = peek(p)
+        if b != '.' and b != '['
+            p.pos = before
+            break
+        list.push(segs, segment(p)!)
+    Ok(JpQuery { absolute: absolute, segments: segs })
+
+// One segment, at a `.` or a `[`.
+fn segment(var p: Parser) -> Result<JpSegment, jperror.JpFault>
+    if peek(p) == '['
+        return Ok(JpChildSeg(bracketed(p)!))
+    if peek_at(p, 1) == '.'
+        p.pos = p.pos + 2
+        if peek(p) == '['
+            return Ok(JpDescendantSeg(bracketed(p)!))
+        return Ok(JpDescendantSeg([dotted(p)!]))
+    p.pos = p.pos + 1
+    Ok(JpChildSeg([dotted(p)!]))
+
+// The selector after `.` or `..`: `*` or a member-name shorthand.
+fn dotted(var p: Parser) -> Result<JpSelector, jperror.JpFault>
+    if peek(p) == '*'
+        p.pos = p.pos + 1
+        return Ok(JpWildcardSel)
+    if not name_first(peek(p))
+        if peek(p) < 0
+            return Err(fault_here(p, JpUnexpectedEnd))
+        return Err(fault_here(p, JpBadName))
+    let start = p.pos
+    for _ in p.pos..str.len(p.text)
+        let b = peek(p)
+        if not name_first(b) and not is_digit(b)
+            break
+        p.pos = p.pos + 1
+    Ok(JpNameSel(str.slice(p.text, start, p.pos)))
+
+// A bracketed selection: `[`, selectors separated by `,`, `]`.
+fn bracketed(var p: Parser) -> Result<[JpSelector], jperror.JpFault>
+    p.pos = p.pos + 1
+    var sels: [JpSelector] = []
+    loop
+        skip_s(p)
+        list.push(sels, selector(p)!)
+        skip_s(p)
+        let b = peek(p)
+        if b == ']'
+            p.pos = p.pos + 1
+            return Ok(sels)
+        if b != ','
+            return Err(fault_here(p, JpBadSelector))
+        p.pos = p.pos + 1
+
+// One selector inside brackets.
+fn selector(var p: Parser) -> Result<JpSelector, jperror.JpFault>
+    let b = peek(p)
+    if b == '\'' or b == '"'
+        return Ok(JpNameSel(string_literal(p)!))
+    if b == '*'
+        p.pos = p.pos + 1
+        return Ok(JpWildcardSel)
+    if b == '?'
+        p.pos = p.pos + 1
+        skip_s(p)
+        return Ok(JpFilterSel(logical_or(p)!))
+    if b == ':' or b == '-' or is_digit(b)
+        return index_or_slice(p)
+    Err(fault_here(p, JpBadSelector))
+
+// An index, or a slice when a `:` follows the first number.
+fn index_or_slice(var p: Parser) -> Result<JpSelector, jperror.JpFault>
+    var start: ?Int = None
+    if peek(p) != ':'
+        start = Some(integer(p)!)
+        let before = p.pos
+        skip_s(p)
+        if peek(p) != ':'
+            p.pos = before
+            return Ok(JpIndexSel(start ?? 0))
+    p.pos = p.pos + 1
+    skip_s(p)
+    var end: ?Int = None
+    if peek(p) == '-' or is_digit(peek(p))
+        end = Some(integer(p)!)
+        skip_s(p)
+    var step: ?Int = None
+    if peek(p) == ':'
+        p.pos = p.pos + 1
+        skip_s(p)
+        if peek(p) == '-' or is_digit(peek(p))
+            step = Some(integer(p)!)
+    Ok(JpSliceSel(JpSlice { start: start, end: end, step: step }))
+
+// An integer as RFC 9535 writes one: `0`, or an optional `-` and a
+// digit that is not zero followed by digits, within `MAX_INDEX`.
+fn integer(var p: Parser) -> Result<Int, jperror.JpFault>
+    let start = p.pos
+    if peek(p) == '-'
+        p.pos = p.pos + 1
+    let first = peek(p)
+    if not is_digit(first)
+        return Err(fault_here(p, JpBadIndex))
+    p.pos = p.pos + 1
+    if first == '0'
+        if p.pos - start > 1 or is_digit(peek(p))
+            return Err(jperror.fault(JpBadIndex, start, p.pos + 1))
+        return Ok(0)
+    for _ in p.pos..str.len(p.text)
+        if not is_digit(peek(p))
+            break
+        p.pos = p.pos + 1
+    let n = str.to_int(str.slice(p.text, start, p.pos)) ?? MAX_INDEX + 1
+    if n > MAX_INDEX or n < 0 - MAX_INDEX
+        return Err(jperror.fault(JpBadIndex, start, p.pos))
+    Ok(n)
+
+// A string literal in single or double quotes, decoded.
+fn string_literal(var p: Parser) -> Result<Str, jperror.JpFault>
+    let quote = peek(p)
+    let open = p.pos
+    p.pos = p.pos + 1
+    var out = ""
+    loop
+        let b = peek(p)
+        if b < 0
+            return Err(jperror.fault(JpUnexpectedEnd, open, p.pos))
+        if b == quote
+            p.pos = p.pos + 1
+            return Ok(out)
+        if b < ' '
+            return Err(fault_here(p, JpBadName))
+        if b == '\\'
+            out = out + escape(p, quote)!
+        else
+            out = out + str.from_byte(b)
+            p.pos = p.pos + 1
+
+// The escape at the parser's position, decoded, inside a string quoted
+// with `quote`.
+fn escape(var p: Parser, quote: Int) -> Result<Str, jperror.JpFault>
+    let at = p.pos
+    let c = peek_at(p, 1)
+    p.pos = p.pos + 2
+    if c == quote or c == '\\' or c == '/'
+        return Ok(str.from_byte(c))
+    if c == 'b'
+        return Ok(str.from_byte(8))
+    if c == 'f'
+        return Ok(str.from_byte(12))
+    if c == 'n'
+        return Ok("\n")
+    if c == 'r'
+        return Ok("\r")
+    if c == 't'
+        return Ok("\t")
+    if c != 'u'
+        return Err(jperror.fault(JpBadEscape, at, p.pos))
+    let hi = hex4(p, at)!
+    if hi >= 0xDC00 and hi <= 0xDFFF
+        return Err(jperror.fault(JpBadEscape, at, p.pos))
+    if hi < 0xD800 or hi > 0xDBFF
+        return Ok(str.from_char(hi))
+    if peek(p) != '\\' or peek_at(p, 1) != 'u'
+        return Err(jperror.fault(JpBadEscape, at, p.pos))
+    p.pos = p.pos + 2
+    let lo = hex4(p, at)!
+    if lo < 0xDC00 or lo > 0xDFFF
+        return Err(jperror.fault(JpBadEscape, at, p.pos))
+    Ok(str.from_char(0x10000 + (hi - 0xD800) * 1024 + (lo - 0xDC00)))
+
+// Four hexadecimal digits at the parser's position, as a number, for
+// the escape that began at `at`.
+fn hex4(var p: Parser, at: Int) -> Result<Int, jperror.JpFault>
+    var n = 0
+    for _ in 0..4
+        let v = hex_value(peek(p))
+        if v < 0
+            return Err(jperror.fault(JpBadEscape, at, p.pos))
+        n = n * 16 + v
+        p.pos = p.pos + 1
+    Ok(n)
+
+// The value of a hexadecimal digit, or -1.
+fn hex_value(b: Int) -> Int
+    if is_digit(b)
+        return b - '0'
+    if b >= 'a' and b <= 'f'
+        return b - 'a' + 10
+    if b >= 'A' and b <= 'F'
+        return b - 'A' + 10
+    0 - 1
+
+// ── Filter expressions ───────────────────────────────────────────────
+
+// `a || b || ...`.
+fn logical_or(var p: Parser) -> Result<JpExpr, jperror.JpFault>
+    var left = logical_and(p)!
+    for _ in p.pos..str.len(p.text)
+        let before = p.pos
+        skip_s(p)
+        if peek(p) != '|' or peek_at(p, 1) != '|'
+            p.pos = before
+            break
+        p.pos = p.pos + 2
+        skip_s(p)
+        let right = logical_and(p)!
+        left = JpExprOr(left, right)
+    Ok(left)
+
+// `a && b && ...`.
+fn logical_and(var p: Parser) -> Result<JpExpr, jperror.JpFault>
+    var left = basic(p)!
+    for _ in p.pos..str.len(p.text)
+        let before = p.pos
+        skip_s(p)
+        if peek(p) != '&' or peek_at(p, 1) != '&'
+            p.pos = before
+            break
+        p.pos = p.pos + 2
+        skip_s(p)
+        let right = basic(p)!
+        left = JpExprAnd(left, right)
+    Ok(left)
+
+// A parenthesised expression, a comparison, or a test, with an
+// optional `!` before a parenthesis or a test.
+fn basic(var p: Parser) -> Result<JpExpr, jperror.JpFault>
+    if peek(p) == '!'
+        p.pos = p.pos + 1
+        skip_s(p)
+        if peek(p) == '('
+            return Ok(JpExprNot(paren(p)!))
+        let at = p.pos
+        let t = term(p)!
+        return Ok(JpExprNot(test_of(p, t, at)!))
+    if peek(p) == '('
+        return paren(p)
+    let at = p.pos
+    let t = term(p)!
+    let before = p.pos
+    skip_s(p)
+    match compare_op(p)
+        Some(op) =>
+            skip_s(p)
+            let left = operand_of(t, at, p.pos)!
+            let rat = p.pos
+            let rt = term(p)!
+            let right = operand_of(rt, rat, p.pos)!
+            Ok(JpExprCompare(left, op, right))
+        None     =>
+            p.pos = before
+            test_of(p, t, at)
+
+// `(`, an expression, `)`.
+fn paren(var p: Parser) -> Result<JpExpr, jperror.JpFault>
+    let open = p.pos
+    p.pos = p.pos + 1
+    skip_s(p)
+    let e = logical_or(p)!
+    skip_s(p)
+    if peek(p) != ')'
+        if peek(p) < 0
+            return Err(jperror.fault(JpUnexpectedEnd, open, p.pos))
+        return Err(fault_here(p, JpBadFilter))
+    p.pos = p.pos + 1
+    Ok(e)
+
+// A comparison operator at the parser's position, consumed, or `None`
+// with nothing consumed.
+fn compare_op(var p: Parser) -> ?JpCompareOp
+    let a = peek(p)
+    let b = peek_at(p, 1)
+    if a == '=' and b == '='
+        p.pos = p.pos + 2
+        return Some(JpOpEq)
+    if a == '!' and b == '='
+        p.pos = p.pos + 2
+        return Some(JpOpNe)
+    if a == '<' and b == '='
+        p.pos = p.pos + 2
+        return Some(JpOpLe)
+    if a == '>' and b == '='
+        p.pos = p.pos + 2
+        return Some(JpOpGe)
+    if a == '<'
+        p.pos = p.pos + 1
+        return Some(JpOpLt)
+    if a == '>'
+        p.pos = p.pos + 1
+        return Some(JpOpGt)
+    None
+
+// What a filter reads before it knows whether it is in a comparison, a
+// test or an argument: a literal, a query or a call.
+enum Term
+    TermLit(lit: JpLiteral)
+    TermQuery(q: JpQuery)
+    TermCall(c: JpCall)
+
+// A literal, a query or a call at the parser's position.
+fn term(var p: Parser) -> Result<Term, jperror.JpFault>
+    let b = peek(p)
+    if b == '@' or b == '$'
+        return Ok(TermQuery(query_at(p)!))
+    if b == '\'' or b == '"'
+        return Ok(TermLit(JpLitStr(string_literal(p)!)))
+    if b == '-' or is_digit(b)
+        return Ok(TermLit(number(p)!))
+    if b >= 'a' and b <= 'z'
+        return word(p)
+    Err(fault_here(p, JpBadFilter))
+
+// `true`, `false`, `null` or a function call.
+fn word(var p: Parser) -> Result<Term, jperror.JpFault>
+    let start = p.pos
+    for _ in p.pos..str.len(p.text)
+        let b = peek(p)
+        if not (b >= 'a' and b <= 'z' or b == '_' or is_digit(b))
+            break
+        p.pos = p.pos + 1
+    let w = str.slice(p.text, start, p.pos)
+    if peek(p) == '('
+        return Ok(TermCall(call(p, w, start)!))
+    if w == "true"
+        return Ok(TermLit(JpLitTrue))
+    if w == "false"
+        return Ok(TermLit(JpLitFalse))
+    if w == "null"
+        return Ok(TermLit(JpLitNull))
+    Err(jperror.fault(JpBadFilter, start, p.pos))
+
+// A number literal: an optional `-`, an integer part with no leading
+// zero, an optional fraction and an optional exponent.
+fn number(var p: Parser) -> Result<JpLiteral, jperror.JpFault>
+    let start = p.pos
+    if peek(p) == '-'
+        p.pos = p.pos + 1
+    if not is_digit(peek(p))
+        return Err(fault_here(p, JpBadFilter))
+    let lead = peek(p)
+    let digits = digit_run(p)
+    if lead == '0' and digits > 1
+        return Err(jperror.fault(JpBadFilter, start, p.pos))
+    var whole = true
+    if peek(p) == '.'
+        p.pos = p.pos + 1
+        if digit_run(p) == 0
+            return Err(fault_here(p, JpBadFilter))
+        whole = false
+    if peek(p) == 'e' or peek(p) == 'E'
+        p.pos = p.pos + 1
+        if peek(p) == '+' or peek(p) == '-'
+            p.pos = p.pos + 1
+        if digit_run(p) == 0
+            return Err(fault_here(p, JpBadFilter))
+        whole = false
+    let text = str.slice(p.text, start, p.pos)
+    if whole
+        match str.to_int(text)
+            Some(n) =>
+                return Ok(JpLitInt(n))
+            None    => ()
+    Ok(JpLitFloat(str.to_float(text) ?? 0.0))
+
+// Skip the digits at the parser's position, answering how many.
+fn digit_run(var p: Parser) -> Int
+    let start = p.pos
+    for _ in p.pos..str.len(p.text)
+        if not is_digit(peek(p))
+            break
+        p.pos = p.pos + 1
+    p.pos - start
+
+// A function call: the name has been read, and the parser is at `(`.
+fn call(var p: Parser, name: Str, at: Int) -> Result<JpCall, jperror.JpFault>
+    let f = function_named(name)
+    let fun = match f
+        Some(x) => x
+        None    =>
+            return Err(jperror.fault(JpUnknownFunction, at, p.pos))
+    p.pos = p.pos + 1
+    skip_s(p)
+    let params = parameter_types(fun)
+    var args: [JpArgument] = []
+    var starts: [Int] = []
+    var ends: [Int] = []
+    if peek(p) != ')'
+        loop
+            list.push(starts, p.pos)
+            list.push(args, argument(p)!)
+            list.push(ends, p.pos)
+            skip_s(p)
+            if peek(p) != ','
+                break
+            p.pos = p.pos + 1
+            skip_s(p)
+    if peek(p) != ')'
+        return Err(fault_here(p, JpBadFilter))
+    p.pos = p.pos + 1
+    if list.len(args) != list.len(params)
+        return Err(jperror.fault(JpWrongArity, at, p.pos))
+    for i in 0..list.len(args)
+        let k = arg_fault(args[i], params[i])
+        if k != None
+            return Err(jperror.fault(k ?? JpWrongArgumentType, starts[i], ends[i]))
+    Ok(JpCall { function: fun, arguments: args })
+
+// One function argument: a literal, a query or a call standing alone,
+// or else a logical expression.
+fn argument(var p: Parser) -> Result<JpArgument, jperror.JpFault>
+    let start = p.pos
+    let b = peek(p)
+    if b == '@' or b == '$' or b == '\'' or b == '"' or b == '-' or is_digit(b) or b >= 'a' and b <= 'z'
+        let t = term(p)!
+        let before = p.pos
+        skip_s(p)
+        let next = peek(p)
+        if next == ',' or next == ')'
+            p.pos = before
+            match t
+                TermLit(l)   =>
+                    return Ok(JpArgLiteral(l))
+                TermQuery(q) =>
+                    return Ok(JpArgQuery(q))
+                TermCall(c)  =>
+                    return Ok(JpArgCall(c))
+        p.pos = start
+    Ok(JpArgLogical(logical_or(p)!))
+
+// A term standing as a test: a query, or a call with a logical result.
+fn test_of(p: Parser, t: Term, at: Int) -> Result<JpExpr, jperror.JpFault>
+    match t
+        TermQuery(q) => Ok(JpExprTest(q))
+        TermCall(c)  =>
+            match result_type(c.function)
+                JpTypeValue => Err(jperror.fault(JpWrongArgumentType, at, p.pos))
+                _           => Ok(JpExprCall(c))
+        TermLit(_)   => Err(jperror.fault(JpBadFilter, at, p.pos))
+
+// A term standing as a comparison's operand: a literal, a singular
+// query, or a call with a value result.
+fn operand_of(t: Term, at: Int, to: Int) -> Result<JpOperand, jperror.JpFault>
+    match t
+        TermLit(l)   => Ok(JpOperandLiteral(l))
+        TermQuery(q) =>
+            if not is_singular(q)
+                return Err(jperror.fault(JpNotSingular, at, to))
+            Ok(JpOperandQuery(q))
+        TermCall(c)  =>
+            match result_type(c.function)
+                JpTypeValue => Ok(JpOperandCall(c))
+                _           => Err(jperror.fault(JpWrongArgumentType, at, to))
+
+// What is wrong with an argument for a parameter of type `t`, if
+// anything (section 2.4.3).  None of the five functions takes a
+// logical parameter or answers a nodelist, so a nodelist parameter
+// takes a query and nothing else, and every other parameter is a value.
+fn arg_fault(a: JpArgument, t: JpArgType) -> ?jperror.JpFaultKind
+    match t
+        JpTypeNodes =>
+            match a
+                JpArgQuery(_) => None
+                _             => Some(JpWrongArgumentType)
+        _           =>
+            match a
+                JpArgLiteral(_) => None
+                JpArgQuery(q)   => if is_singular(q)
+                    None
+                else
+                    Some(JpWrongArgumentType)
+                JpArgCall(c)    => value_fault(result_type(c.function))
+                JpArgLogical(_) => Some(JpWrongArgumentType)
+
+// `JpWrongArgumentType` for a result that is not a value.
+fn value_fault(r: JpArgType) -> ?jperror.JpFaultKind
+    match r
+        JpTypeValue => None
+        _           => Some(JpWrongArgumentType)
+
+// ── Checking a built query ───────────────────────────────────────────
+
+// The first fault in a query built in code, if any.
+fn query_fault(q: JpQuery) -> ?jperror.JpFaultKind
+    for seg in q.segments
+        let sels = match seg
+            JpChildSeg(s)      => s
+            JpDescendantSeg(s) => s
+        for sel in sels
+            let k = selector_fault(sel)
+            if k != None
+                return k
+    None
+
+// The first fault in one selector, if any.
+fn selector_fault(sel: JpSelector) -> ?jperror.JpFaultKind
+    match sel
+        JpIndexSel(i)  => index_fault(i)
+        JpSliceSel(b)  =>
+            let k = index_fault(b.start ?? 0)
+            if k != None
+                return k
+            let k2 = index_fault(b.end ?? 0)
+            if k2 != None
+                return k2
+            index_fault(b.step ?? 1)
+        JpFilterSel(e) => expr_fault(e)
+        _              => None
+
+// `JpBadIndex` for an integer outside `MAX_INDEX`.
+fn index_fault(i: Int) -> ?jperror.JpFaultKind
+    if i > MAX_INDEX or i < 0 - MAX_INDEX
+        return Some(JpBadIndex)
+    None
+
+// The first fault in a logical expression, if any.
+fn expr_fault(e: JpExpr) -> ?jperror.JpFaultKind
+    match e
+        JpExprOr(a, b)         => first_of(expr_fault(a), expr_fault(b))
+        JpExprAnd(a, b)        => first_of(expr_fault(a), expr_fault(b))
+        JpExprNot(a)           => expr_fault(a)
+        JpExprTest(q)          => query_fault(q)
+        JpExprCompare(l, _, r) => first_of(operand_fault(l), operand_fault(r))
+        JpExprCall(c)          =>
+            let k = call_fault(c)
+            if k != None
+                return k
+            match result_type(c.function)
+                JpTypeValue => Some(JpWrongArgumentType)
+                _           => None
+
+// The first of two faults.
+fn first_of(a: ?jperror.JpFaultKind, b: ?jperror.JpFaultKind) -> ?jperror.JpFaultKind
+    if a != None
+        return a
+    b
+
+// The first fault in a comparison's operand, if any.
+fn operand_fault(o: JpOperand) -> ?jperror.JpFaultKind
+    match o
+        JpOperandLiteral(_) => None
+        JpOperandQuery(q)   =>
+            if not is_singular(q)
+                return Some(JpNotSingular)
+            query_fault(q)
+        JpOperandCall(c)    =>
+            let k = call_fault(c)
+            if k != None
+                return k
+            value_fault(result_type(c.function))
+
+// The first fault in a call, if any: its arity, then each argument.
+fn call_fault(c: JpCall) -> ?jperror.JpFaultKind
+    let params = parameter_types(c.function)
+    if list.len(params) != list.len(c.arguments)
+        return Some(JpWrongArity)
+    var i = 0
+    for a in c.arguments
+        let k = first_of(arg_fault(a, params[i]), arg_inner_fault(a))
+        if k != None
+            return k
+        i = i + 1
+    None
+
+// The first fault inside an argument's own parts, if any.
+fn arg_inner_fault(a: JpArgument) -> ?jperror.JpFaultKind
+    match a
+        JpArgLiteral(_) => None
+        JpArgQuery(q)   => query_fault(q)
+        JpArgCall(c)    => call_fault(c)
+        JpArgLogical(e) => expr_fault(e)
+
+// ── Rendering ────────────────────────────────────────────────────────
+
+// Selectors joined with `,`.
+fn render_selectors(sels: [JpSelector]) -> Str
+    var parts: [Str] = []
+    for s in sels
+        list.push(parts, render_selector(s))
+    str.join(parts, ",")
+
+// One selector.
+fn render_selector(s: JpSelector) -> Str
+    match s
+        JpNameSel(n)   => quote(n)
+        JpWildcardSel  => "*"
+        JpIndexSel(i)  => "${i}"
+        JpSliceSel(b)  => render_slice(b)
+        JpFilterSel(e) => "?" + render_expr(e, 0)
+
+// A slice, with its absent parts left out.
+fn render_slice(b: JpSlice) -> Str
+    var out = ""
+    match b.start
+        Some(n) =>
+            out = "${n}"
+        None    => ()
+    out = out + ":"
+    match b.end
+        Some(n) =>
+            out = out + "${n}"
+        None    => ()
+    match b.step
+        Some(n) =>
+            out = out + ":${n}"
+        None    => ()
+    out
+
+// An expression, parenthesised when its precedence is below `level`:
+// 0 inside a filter or parentheses, 1 as an operand of `||`, 2 as an
+// operand of `&&`.
+fn render_expr(e: JpExpr, level: Int) -> Str
+    match e
+        JpExprOr(a, b)         => wrap(render_expr(a, 1) + " || " + render_expr(b, 1), level > 1)
+        JpExprAnd(a, b)        => wrap(render_expr(a, 2) + " && " + render_expr(b, 2), level > 2)
+        JpExprNot(a)           => "!" + wrap(render_expr(a, 0), not is_atom(a))
+        JpExprTest(q)          => render(q)
+        JpExprCompare(l, o, r) => render_operand(l) + " " + op_text(o) + " " + render_operand(r)
+        JpExprCall(c)          => render_call(c)
+
+// Whether an expression needs no parentheses after `!`.
+fn is_atom(e: JpExpr) -> Bool
+    match e
+        JpExprTest(_) => true
+        JpExprCall(_) => true
+        _             => false
+
+// Text in parentheses when `yes`.
+fn wrap(s: Str, yes: Bool) -> Str
+    if yes
+        return "(" + s + ")"
+    s
+
+// A comparison operator's spelling.
+fn op_text(o: JpCompareOp) -> Str
+    match o
+        JpOpEq => "=="
+        JpOpNe => "!="
+        JpOpLt => "<"
+        JpOpLe => "<="
+        JpOpGt => ">"
+        JpOpGe => ">="
+
+// One operand.
+fn render_operand(o: JpOperand) -> Str
+    match o
+        JpOperandLiteral(l) => render_literal(l)
+        JpOperandQuery(q)   => render(q)
+        JpOperandCall(c)    => render_call(c)
+
+// A call and its arguments.
+fn render_call(c: JpCall) -> Str
+    var parts: [Str] = []
+    for a in c.arguments
+        match a
+            JpArgLiteral(l)  => list.push(parts, render_literal(l))
+            JpArgQuery(q)    => list.push(parts, render(q))
+            JpArgCall(inner) => list.push(parts, render_call(inner))
+            JpArgLogical(e)  => list.push(parts, render_expr(e, 0))
+    function_name(c.function) + "(" + str.join(parts, ", ") + ")"
+
+// A literal as the grammar writes it.
+fn render_literal(l: JpLiteral) -> Str
+    match l
+        JpLitStr(s)   => quote(s)
+        JpLitInt(n)   => "${n}"
+        JpLitFloat(f) => str.from_float(f)
+        JpLitTrue     => "true"
+        JpLitFalse    => "false"
+        JpLitNull     => "null"
+
+// A string in single quotes with the escapes of RFC 9535 section 2.7:
+// `\b`, `\f`, `\n`, `\r`, `\t`, `\'`, `\\`, and `\u00xx` in lower-case
+// hexadecimal for any other control character.
+pub fn quote(s: Str) -> Str []
+    var out = "'"
+    for i in 0..str.len(s)
+        let b = str.byte_at_or(s, i, 0)
+        if b == '\''
+            out = out + "\\'"
+        else if b == '\\'
+            out = out + "\\\\"
+        else if b >= ' '
+            out = out + str.from_byte(b)
+        else
+            out = out + control_escape(b)
+    out + "'"
+
+// The escape of a control character in a normalized path.
+fn control_escape(b: Int) -> Str
+    if b == 8
+        return "\\b"
+    if b == 9
+        return "\\t"
+    if b == 10
+        return "\\n"
+    if b == 12
+        return "\\f"
+    if b == 13
+        return "\\r"
+    let digits = "0123456789abcdef"
+    "\\u00" + str.slice(digits, b / 16, b / 16 + 1) + str.slice(digits, b % 16, b % 16 + 1)

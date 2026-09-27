@@ -1,63 +1,65 @@
-// jpregex.nv — I-Regexp (RFC 9485), which is the only pattern language
-// `match()` and `search()` may use.
+// jpregex.nv — I-Regexp (RFC 9485), the pattern language of RFC 9535's
+// `match()` and `search()`.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// I-Regexp is a subset of regular expressions chosen so that a pattern
+// matches the same strings in every implementation.  It has no anchors,
+// so `^` and `$` are ordinary characters.  It has no back-references,
+// no lookaround, no lazy quantifiers, no captures, no inline flags and
+// no multi-character escapes such as `\d`.  A pattern that uses any of
+// these is refused with `JpBadRegex`, and `unsupported_construct` names
+// what it used.
 //
-// WHY THIS IS HERE AND NOT `std.regex`.  I-Regexp is not "a small
-// regex"; it is a DIFFERENT LANGUAGE that happens to look like one, and
-// the difference is the point of RFC 9485.  It has no anchors — `^` and
-// `$` are ordinary characters — no backreferences, no lookaround, no
-// lazy quantifiers, no named groups and no capture semantics at all,
-// because every one of those is either unimplementable in an automaton
-// or specified differently by every engine that has it.  What is left
-// matches the same strings on every implementation, which is what makes
-// a JSONPath query portable.
+// A pattern is compiled into a small automaton and matched by walking
+// every possible state at once, a character at a time, so the time a
+// match takes grows with the pattern's size times the text's length and
+// never more.  Characters are Unicode scalar values decoded from the
+// text's UTF-8.  `.` matches any character but a line feed and a
+// carriage return, as XSD's `.` does.
 //
-// So accepting a `std.regex` pattern here would be worse than refusing
-// one: a query with `(?i)` or `\1` in it would work on this
-// implementation, and a service on the other side of the wire running a
-// conforming one would answer different nodes for the same query.  A
-// pattern outside I-Regexp is `JpBadRegex`, by name.
+// `\p{...}` and `\P{...}` name Unicode general categories, and the
+// category table is not in this package.  `compile` refuses a pattern
+// that uses one with `JpNoCategoryLookup`, and `compile_with` takes the
+// lookup as a function the caller supplies.
 //
-// `\p{...}` IS IN THE LANGUAGE, AND THE TABLE IS NOT.  RFC 9485 § 2's
-// grammar includes the category escapes, which need Unicode's general
-// categories — a quarter of a megabyte of table that a caller selecting
-// `$.store.book[0].title` should not carry.  So `compile` refuses a
-// pattern that uses one, with `JpNoCategoryLookup`, and `compile_with`
-// takes the lookup as a function the caller supplies.  A caller that
-// already depends on unicode-nv passes its own; one that does not gets
-// a named refusal rather than a pattern that quietly matches nothing.
-// That is `docs/publishing.md` § How a `core` package takes a stream
-// from its host, applied to a table instead of to a stream.
-//
-// MATCHING IS ANCHORED OR IT IS NOT, AND THAT IS THE WHOLE DIFFERENCE
-// between the two RFC 9535 functions: `match()` requires the pattern to
-// match the ENTIRE string and `search()` any substring.  One compiled
-// pattern answers both, so a caller that needs both pays for one
-// compile.
+// `match()` asks whether the whole string matches, and `search()`
+// whether any substring does.  One compiled pattern answers both.
 
+use std.list
+use std.str
 use jperror
 
 // A compiled pattern.
 //
-// Opaque on purpose: the representation is an automaton and nothing
-// outside this module should match on it.  It holds no reference to the
-// pattern string, so a caller may drop that.
+// `states` is the automaton's size, which a caller bounding an
+// untrusted pattern reads: `(a|b){1,1000}` is short to write and has
+// thousands of states.  The other fields are the automaton.
 pub struct JpRegex
-    // The number of states the automaton has.  Public because it is the
-    // one thing a caller bounding an untrusted pattern wants — a
-    // pattern is cheap to write and `(a|b){1,1000}` is not — and
-    // because it is a number rather than a structure.
+    // The number of instructions in the automaton.
     states: Int
-    // Whether the pattern uses a category escape, and so whether it
-    // needed the lookup.
+    // Whether the pattern uses a category escape.
     uses_categories: Bool
+    // The automaton's instructions.
+    program: [JpRegexInst]
+    // The general category of a code point, as a two-letter
+    // abbreviation.
+    category_of: fn(Int) -> Str
 
-// Compile a pattern, refusing one that needs the Unicode categories.
+// One instruction of a compiled pattern.
 //
-// Everything RFC 9485 defines except `\p{...}` and `\P{...}`: literal
-// characters, `.`, `[...]` character classes with ranges and the
-// single-character escapes, `|`, `?`, `*`, `+`, `{n,m}`, and grouping.
+// `op` is 0 for a character test, 1 for a fork to `x` and `y`, 2 for a
+// jump to `x`, and 3 for a match.  A character test holds its class in
+// `ranges`, pairs of inclusive bounds, and `cats`, category names, and
+// `negated` inverts it.
+pub struct JpRegexInst
+    op: Int
+    x: Int
+    y: Int
+    ranges: [Int]
+    cats: [Str]
+    negated: Bool
+
+// Compile a pattern, refusing one that uses a category escape with
+// `JpNoCategoryLookup`.
 //
 // ```novo
 // use jpregex
@@ -68,26 +70,26 @@ pub struct JpRegex
 //         Err(f) => println("${f.at}")
 // ```
 pub fn compile(pattern: Str) -> Result<JpRegex, jperror.JpFault> []
-    todo("jsonpath-nv.jpregex.compile")
+    let re = compile_with(pattern, no_categories)!
+    if re.uses_categories
+        let at = str.index(pattern, "\\p") ?? str.index(pattern, "\\P") ?? 0
+        return Err(jperror.fault(JpNoCategoryLookup, at, at + 2))
+    Ok(re)
 
-// Compile a pattern, resolving `\p{...}` through a lookup the caller
-// supplies.
+// Compile a pattern, resolving category escapes with `category_of`.
 //
-// `category_of` answers a code point's Unicode general category as its
-// two-letter abbreviation — `"Lu"`, `"Nd"`, `"Zs"` — which is what
-// unicode-nv's `uclass.category_abbrev(uclass.category(data, ch))`
-// composes to.  A one-letter escape like `\p{L}` matches every category
-// whose abbreviation starts with that letter, which is XSD's rule and
-// RFC 9485's by reference.
+// `category_of` answers a code point's general category as its
+// two-letter abbreviation, such as `"Lu"`, `"Nd"` or `"Zs"`.  A
+// one-letter escape such as `\p{L}` matches every category whose
+// abbreviation begins with that letter.
 //
 // ```novo
 // use jpregex
 //
 // fn ascii_category(ch: Int) -> Str
-//     if ch >= 97 && ch <= 122
-//         "Ll"
-//     else
-//         "Cn"
+//     if ch >= 97 and ch <= 122
+//         return "Ll"
+//     "Cn"
 //
 // fn main() [io]
 //     match jpregex.compile_with("\\p{L}+", ascii_category)
@@ -96,9 +98,17 @@ pub fn compile(pattern: Str) -> Result<JpRegex, jperror.JpFault> []
 // ```
 pub fn compile_with(pattern: Str,
                     category_of: fn(Int) -> Str) -> Result<JpRegex, jperror.JpFault> []
-    todo("jsonpath-nv.jpregex.compile_with")
+    var p = RxParser { cps: code_points(pattern), text: pattern, pos: 0, cats: false }
+    let tree = alternation(p)!
+    if p.pos < list.len(p.cps)
+        return Err(rx_fault(p))
+    var prog: [JpRegexInst] = []
+    emit(prog, tree)
+    list.push(prog, inst(3, 0, 0))
+    Ok(JpRegex { states: list.len(prog), uses_categories: p.cats, program: prog,
+                 category_of: category_of })
 
-// Whether the whole string matches — RFC 9535's `match()`.
+// Whether the whole string matches: RFC 9535's `match()`.
 //
 // ```novo
 // use jpregex
@@ -111,9 +121,9 @@ pub fn compile_with(pattern: Str,
 //             println("${hit}")
 // ```
 pub fn is_match(re: JpRegex, text: Str) -> Bool []
-    todo("jsonpath-nv.jpregex.is_match")
+    run(re, code_points(text), true)
 
-// Whether any substring matches — RFC 9535's `search()`.
+// Whether some substring matches: RFC 9535's `search()`.
 //
 // ```novo
 // use jpregex
@@ -126,12 +136,9 @@ pub fn is_match(re: JpRegex, text: Str) -> Bool []
 //             println("${hit}")
 // ```
 pub fn search(re: JpRegex, text: Str) -> Bool []
-    todo("jsonpath-nv.jpregex.search")
+    run(re, code_points(text), false)
 
-// Whether a pattern is I-Regexp at all, without compiling it.
-//
-// The check a tool validating somebody's query makes, and the one a
-// caller makes before deciding whether it needs `compile_with`.
+// Whether a pattern is I-Regexp, category escapes included.
 //
 // ```novo
 // use jpregex
@@ -141,9 +148,12 @@ pub fn search(re: JpRegex, text: Str) -> Bool []
 //     println("${ok}")
 // ```
 pub fn is_iregexp(pattern: Str) -> Bool []
-    todo("jsonpath-nv.jpregex.is_iregexp")
+    match compile_with(pattern, no_categories)
+        Ok(_)  => true
+        Err(_) => false
 
-// Whether a pattern uses a category escape, and so needs the lookup.
+// Whether an I-Regexp pattern uses a category escape, and so needs
+// `compile_with`.  False for a pattern that is not I-Regexp.
 //
 // ```novo
 // use jpregex
@@ -153,20 +163,18 @@ pub fn is_iregexp(pattern: Str) -> Bool []
 //     println("${needs}")
 // ```
 pub fn needs_categories(pattern: Str) -> Bool []
-    todo("jsonpath-nv.jpregex.needs_categories")
+    match compile_with(pattern, no_categories)
+        Ok(re) => re.uses_categories
+        Err(_) => false
 
-// The construct in a pattern that I-Regexp does not have, if any.
+// The construct a pattern uses that I-Regexp does not have, or `None`
+// for an I-Regexp pattern.
 //
-// A `?Str` naming it — `"backreference"`, `"lookahead"`,
-// `"lazy quantifier"`, `"anchor"`, `"inline flag"` — so that a tool
-// rejecting a query can tell the person WHY their pattern, which works
-// in every other language they use, is not one here.  `None` for a
-// pattern that is I-Regexp.
-//
-// It is the difference between a library that says "invalid regex" and
-// one that says "I-Regexp has no `(?i)`; fold the case in the character
-// class instead", and the second is the only one worth shipping for a
-// language nobody has used before.
+// The names are `backreference`, `lookahead`, `lookbehind`,
+// `named group`, `non-capturing group`, `inline flag`,
+// `lazy quantifier`, `possessive quantifier`, `anchor`,
+// `multi-character escape`, `class subtraction` and, for anything
+// else, `syntax`.
 //
 // ```novo
 // use jpregex
@@ -175,4 +183,479 @@ pub fn needs_categories(pattern: Str) -> Bool []
 //     println(jpregex.unsupported_construct("(?i)abc") ?? "it is I-Regexp")
 // ```
 pub fn unsupported_construct(pattern: Str) -> ?Str []
-    todo("jsonpath-nv.jpregex.unsupported_construct")
+    if is_iregexp(pattern)
+        return None
+    let cps = code_points(pattern)
+    let n = list.len(cps)
+    var i = 0
+    for _ in 0..n
+        if i >= n
+            break
+        let c = cps[i]
+        let next = at(cps, i + 1)
+        if c == '\\'
+            if next >= '1' and next <= '9'
+                return Some("backreference")
+            if next == 'b' or next == 'B' or next == 'A' or next == 'z' or next == 'Z' or next == 'G'
+                return Some("anchor")
+            if str.contains("dDwWsSiIcC", str.from_byte(next))
+                return Some("multi-character escape")
+            i = i + 2
+            continue
+        if c == '(' and next == '?'
+            return Some(group_kind(at(cps, i + 2), at(cps, i + 3)))
+        if (c == '*' or c == '+' or c == '?' or c == '}') and (next == '?' or next == '+') and i > 0
+            if next == '?'
+                return Some("lazy quantifier")
+            return Some("possessive quantifier")
+        if c == '-' and next == '['
+            return Some("class subtraction")
+        i = i + 1
+    Some("syntax")
+
+// A category lookup that knows no category: every code point is `Cn`,
+// unassigned.  Under it `\p{L}` matches nothing and `\P{L}` matches
+// every character.
+//
+// ```novo
+// use jpregex
+//
+// fn main() [io]
+//     println(jpregex.no_categories(65))
+// ```
+pub fn no_categories(cp: Int) -> Str []
+    "Cn"
+
+// ── Parsing ──────────────────────────────────────────────────────────
+
+// The node of a parsed pattern.
+enum RxNode
+    // A character test.
+    RxClass(ranges: [Int], cats: [Str], negated: Bool)
+    // Nodes one after another.
+    RxSeq(items: [RxNode])
+    // One of several.
+    RxAlt(items: [RxNode])
+    // A node repeated from `lo` to `hi` times, `hi` -1 for no bound.
+    RxRepeat(node: RxNode, lo: Int, hi: Int)
+
+// A pattern as code points, and the position of the next one.
+struct RxParser
+    cps: [Int]
+    text: Str
+    var pos: Int
+    // Whether a category escape has been read.
+    var cats: Bool
+
+// The code point at `i`, or -1.
+fn at(cps: [Int], i: Int) -> Int
+    if i < 0 or i >= list.len(cps)
+        return 0 - 1
+    cps[i]
+
+// The code point at the parser's position, or -1.
+fn cur(p: RxParser) -> Int
+    at(p.cps, p.pos)
+
+// A fault at the parser's position, as a byte range into the pattern.
+fn rx_fault(p: RxParser) -> jperror.JpFault
+    let b = byte_offset(p.cps, p.pos)
+    jperror.fault(JpBadRegex, b, b + 1)
+
+// The byte offset of code point `i`.
+fn byte_offset(cps: [Int], i: Int) -> Int
+    var n = 0
+    var k = 0
+    for c in cps
+        if k >= i
+            break
+        n = n + utf8_len(c)
+        k = k + 1
+    n
+
+// How many bytes a code point takes in UTF-8.
+fn utf8_len(c: Int) -> Int
+    if c < 0x80
+        return 1
+    if c < 0x800
+        return 2
+    if c < 0x10000
+        return 3
+    4
+
+// `branch ( '|' branch )*`.
+fn alternation(var p: RxParser) -> Result<RxNode, jperror.JpFault>
+    var alts: [RxNode] = [branch(p)!]
+    for _ in p.pos..list.len(p.cps)
+        if cur(p) != '|'
+            break
+        p.pos = p.pos + 1
+        list.push(alts, branch(p)!)
+    if list.len(alts) == 1
+        return Ok(alts[0])
+    Ok(RxAlt(alts))
+
+// A run of pieces, up to `|`, `)` or the end.
+fn branch(var p: RxParser) -> Result<RxNode, jperror.JpFault>
+    var items: [RxNode] = []
+    for _ in p.pos..list.len(p.cps)
+        let c = cur(p)
+        if c < 0 or c == '|' or c == ')'
+            break
+        list.push(items, piece(p)!)
+    Ok(RxSeq(items))
+
+// An atom and its quantifier, if it has one.
+fn piece(var p: RxParser) -> Result<RxNode, jperror.JpFault>
+    let a = atom(p)!
+    let c = cur(p)
+    if c == '*'
+        p.pos = p.pos + 1
+        return Ok(RxRepeat(a, 0, 0 - 1))
+    if c == '+'
+        p.pos = p.pos + 1
+        return Ok(RxRepeat(a, 1, 0 - 1))
+    if c == '?'
+        p.pos = p.pos + 1
+        return Ok(RxRepeat(a, 0, 1))
+    if c == '{'
+        return range_quantifier(p, a)
+    Ok(a)
+
+// `{n}`, `{n,}` or `{n,m}`.
+fn range_quantifier(var p: RxParser, a: RxNode) -> Result<RxNode, jperror.JpFault>
+    p.pos = p.pos + 1
+    let lo = rx_number(p)!
+    var hi = lo
+    if cur(p) == ','
+        p.pos = p.pos + 1
+        hi = 0 - 1
+        if cur(p) >= '0' and cur(p) <= '9'
+            hi = rx_number(p)!
+    if cur(p) != '}' or hi >= 0 and hi < lo
+        return Err(rx_fault(p))
+    p.pos = p.pos + 1
+    Ok(RxRepeat(a, lo, hi))
+
+// One or more decimal digits.
+fn rx_number(var p: RxParser) -> Result<Int, jperror.JpFault>
+    var n = 0
+    let start = p.pos
+    for _ in p.pos..list.len(p.cps)
+        let c = cur(p)
+        if c < '0' or c > '9'
+            break
+        n = n * 10 + c - '0'
+        p.pos = p.pos + 1
+    if p.pos == start
+        return Err(rx_fault(p))
+    Ok(n)
+
+// A character, `.`, an escape, a class or a group.
+fn atom(var p: RxParser) -> Result<RxNode, jperror.JpFault>
+    let c = cur(p)
+    if c == '('
+        p.pos = p.pos + 1
+        let inner = alternation(p)!
+        if cur(p) != ')'
+            return Err(rx_fault(p))
+        p.pos = p.pos + 1
+        return Ok(inner)
+    if c == '.'
+        p.pos = p.pos + 1
+        return Ok(RxClass([10, 10, 13, 13], [], true))
+    if c == '['
+        return class_expr(p)
+    if c == '\\'
+        return escape_atom(p)
+    if c == ')' or c == '*' or c == '+' or c == '?' or c == ']' or c == '{' or c == '}'
+        return Err(rx_fault(p))
+    p.pos = p.pos + 1
+    Ok(RxClass([c, c], [], false))
+
+// An escape outside a class: a single-character escape or a category.
+fn escape_atom(var p: RxParser) -> Result<RxNode, jperror.JpFault>
+    let e = cur_escape(p)!
+    match e
+        EscChar(c)       => Ok(RxClass([c, c], [], false))
+        EscCat(cat, neg) => Ok(RxClass([], [cat], neg))
+
+// What an escape denotes.
+enum Esc
+    EscChar(c: Int)
+    EscCat(cat: Str, negated: Bool)
+
+// The escape at the parser's position, which holds `\`.
+fn cur_escape(var p: RxParser) -> Result<Esc, jperror.JpFault>
+    let c = at(p.cps, p.pos + 1)
+    if c == 'n'
+        p.pos = p.pos + 2
+        return Ok(EscChar(10))
+    if c == 'r'
+        p.pos = p.pos + 2
+        return Ok(EscChar(13))
+    if c == 't'
+        p.pos = p.pos + 2
+        return Ok(EscChar(9))
+    if c >= 0 and str.contains("()*+-.?[\\]^{|}", str.from_byte(c))
+        p.pos = p.pos + 2
+        return Ok(EscChar(c))
+    if c == 'p' or c == 'P'
+        p.pos = p.pos + 2
+        return category(p, c == 'P')
+    p.pos = p.pos + 1
+    Err(rx_fault(p))
+
+// `{Name}` after `\p` or `\P`: one of RFC 9485's category names.
+fn category(var p: RxParser, negated: Bool) -> Result<Esc, jperror.JpFault>
+    if cur(p) != '{'
+        return Err(rx_fault(p))
+    let major = at(p.cps, p.pos + 1)
+    var minor = at(p.cps, p.pos + 2)
+    var len = 2
+    if minor == '}'
+        minor = 0 - 1
+        len = 1
+    if at(p.cps, p.pos + 1 + len) != '}'
+        return Err(rx_fault(p))
+    let name = if minor < 0
+        str.from_byte(major)
+    else
+        str.from_byte(major) + str.from_byte(minor)
+    if not category_ok(major, minor)
+        return Err(rx_fault(p))
+    p.pos = p.pos + len + 2
+    p.cats = true
+    Ok(EscCat(name, negated))
+
+// Whether a major category letter and an optional minor letter (-1 for
+// none) name one of RFC 9485's categories.
+fn category_ok(major: Int, minor: Int) -> Bool
+    let minors = if major == 'L'
+        "lmotu"
+    else
+        if major == 'M'
+            "cen"
+        else
+            if major == 'N'
+                "dlo"
+            else
+                if major == 'P'
+                    "cdefios"
+                else
+                    if major == 'Z'
+                        "lps"
+                    else
+                        if major == 'S'
+                            "ckmo"
+                        else
+                            if major == 'C'
+                                "cfno"
+                            else
+                                ""
+    if minors == ""
+        return false
+    minor < 0 or minor < 128 and str.contains(minors, str.from_byte(minor))
+
+// A class: `[`, an optional `^`, items, `]`.
+fn class_expr(var p: RxParser) -> Result<RxNode, jperror.JpFault>
+    p.pos = p.pos + 1
+    var negated = false
+    if cur(p) == '^'
+        negated = true
+        p.pos = p.pos + 1
+    var ranges: [Int] = []
+    var cats: [Str] = []
+    var first = true
+    loop
+        let c = cur(p)
+        if c < 0
+            return Err(rx_fault(p))
+        if c == ']' and not first
+            p.pos = p.pos + 1
+            return Ok(RxClass(ranges, cats, negated))
+        if c == '-' and (first or at(p.cps, p.pos + 1) == ']')
+            p.pos = p.pos + 1
+            list.push(ranges, '-')
+            list.push(ranges, '-')
+        else
+            let lo = class_char(p)!
+            match lo
+                EscCat(cat, neg) =>
+                    if neg
+                        return Err(rx_fault(p))
+                    list.push(cats, cat)
+                EscChar(a)       =>
+                    var b = a
+                    if cur(p) == '-' and at(p.cps, p.pos + 1) != ']'
+                        p.pos = p.pos + 1
+                        match class_char(p)!
+                            EscChar(z)   =>
+                                b = z
+                            EscCat(_, _) =>
+                                return Err(rx_fault(p))
+                        if b < a
+                            return Err(rx_fault(p))
+                    list.push(ranges, a)
+                    list.push(ranges, b)
+        first = false
+
+// One character inside a class, or a category escape.
+fn class_char(var p: RxParser) -> Result<Esc, jperror.JpFault>
+    let c = cur(p)
+    if c == '\\'
+        return cur_escape(p)
+    if c == '[' or c == ']' or c == '-'
+        return Err(rx_fault(p))
+    p.pos = p.pos + 1
+    Ok(EscChar(c))
+
+// ── Compiling and running ────────────────────────────────────────────
+
+// A control instruction.
+fn inst(op: Int, x: Int, y: Int) -> JpRegexInst
+    JpRegexInst { op: op, x: x, y: y, ranges: [], cats: [], negated: false }
+
+// The instructions of a node, appended to `prog`.
+fn emit(var prog: [JpRegexInst], n: RxNode)
+    match n
+        RxClass(r, c, neg)  =>
+            list.push(prog, JpRegexInst { op: 0, x: 0, y: 0, ranges: r, cats: c, negated: neg })
+        RxSeq(items)        =>
+            for it in items
+                emit(prog, it)
+        RxAlt(items)        => emit_alt(prog, items, 0)
+        RxRepeat(m, lo, hi) => emit_repeat(prog, m, lo, hi)
+
+// Alternatives from `i` on: a fork to the first and to the rest.
+fn emit_alt(var prog: [JpRegexInst], items: [RxNode], i: Int)
+    if i == list.len(items) - 1
+        emit(prog, items[i])
+        return
+    let fork = list.len(prog)
+    list.push(prog, inst(1, fork + 1, 0))
+    emit(prog, items[i])
+    let jump = list.len(prog)
+    list.push(prog, inst(2, 0, 0))
+    prog[fork] = inst(1, fork + 1, list.len(prog))
+    emit_alt(prog, items, i + 1)
+    prog[jump] = inst(2, list.len(prog), 0)
+
+// A node repeated from `lo` to `hi` times, `hi` -1 for no bound.
+fn emit_repeat(var prog: [JpRegexInst], m: RxNode, lo: Int, hi: Int)
+    for _ in 0..lo
+        emit(prog, m)
+    if hi < 0
+        let fork = list.len(prog)
+        list.push(prog, inst(1, fork + 1, 0))
+        emit(prog, m)
+        list.push(prog, inst(2, fork, 0))
+        prog[fork] = inst(1, fork + 1, list.len(prog))
+        return
+    var forks: [Int] = []
+    for _ in lo..hi
+        list.push(forks, list.len(prog))
+        list.push(prog, inst(1, 0, 0))
+        emit(prog, m)
+    let end = list.len(prog)
+    for f in forks
+        prog[f] = inst(1, f + 1, end)
+
+// The code points of a string's UTF-8.  A byte that begins no valid
+// sequence stands for itself.
+fn code_points(s: Str) -> [Int]
+    var out: [Int] = []
+    let n = str.len(s)
+    var i = 0
+    for _ in 0..n
+        if i >= n
+            break
+        let b = str.byte_at_or(s, i, 0)
+        var len = 1
+        var cp = b
+        if b >= 0xF0
+            len = 4
+            cp = b & 0x07
+        else if b >= 0xE0
+            len = 3
+            cp = b & 0x0F
+        else if b >= 0xC0
+            len = 2
+            cp = b & 0x1F
+        if i + len > n
+            len = 1
+            cp = b
+        for k in 1..len
+            cp = cp * 64 + (str.byte_at_or(s, i + k, 0) & 0x3F)
+        list.push(out, cp)
+        i = i + len
+    out
+
+// Whether a character test admits a code point.
+fn admits(re: JpRegex, ins: JpRegexInst, c: Int) -> Bool
+    var hit = false
+    var i = 0
+    for _ in 0..list.len(ins.ranges) / 2
+        if c >= ins.ranges[i] and c <= ins.ranges[i + 1]
+            hit = true
+        i = i + 2
+    if not hit and list.len(ins.cats) > 0
+        let cat = re.category_of(c)
+        for want in ins.cats
+            if str.starts_with(cat, want)
+                hit = true
+    hit != ins.negated
+
+// The states reachable from `pc` without reading a character, added to
+// `set`.  `mark` records which have been added at this position.
+fn add_state(re: JpRegex, var set: [Int], var mark: [Int], stamp: Int, pc: Int)
+    if mark[pc] == stamp
+        return
+    mark[pc] = stamp
+    let ins = re.program[pc]
+    if ins.op == 1
+        add_state(re, set, mark, stamp, ins.x)
+        add_state(re, set, mark, stamp, ins.y)
+    else if ins.op == 2
+        add_state(re, set, mark, stamp, ins.x)
+    else
+        list.push(set, pc)
+
+// Whether the automaton matches the text, the whole of it when
+// `anchored`, some substring of it otherwise.
+fn run(re: JpRegex, text: [Int], anchored: Bool) -> Bool
+    var mark: [Int] = []
+    for _ in 0..re.states
+        list.push(mark, 0 - 1)
+    var set: [Int] = []
+    add_state(re, set, mark, 0, 0)
+    let n = list.len(text)
+    for i in 0..n + 1
+        for pc in set
+            if re.program[pc].op == 3 and (not anchored or i == n)
+                return true
+        if i == n
+            break
+        var next: [Int] = []
+        for pc in set
+            let ins = re.program[pc]
+            if ins.op == 0 and admits(re, ins, text[i])
+                add_state(re, next, mark, i + 1, pc + 1)
+        if not anchored
+            add_state(re, next, mark, i + 1, 0)
+        set = next
+    false
+
+// The kind of a `(?` group, from the two code points after `?`.
+fn group_kind(a: Int, b: Int) -> Str
+    if a == '='
+        return "lookahead"
+    if a == '!'
+        return "lookahead"
+    if a == '<' and (b == '=' or b == '!')
+        return "lookbehind"
+    if a == '<' or a == 'P'
+        return "named group"
+    if a == ':'
+        return "non-capturing group"
+    "inline flag"

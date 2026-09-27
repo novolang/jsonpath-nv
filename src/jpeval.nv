@@ -1,79 +1,66 @@
 // jpeval.nv — a query run against a document, answering nodes and the
 // normalized path of each one.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// Evaluation cannot fail, and nothing here but `query`, which parses,
+// answers a `Result`.  RFC 9535 makes every disagreement during a run
+// produce false or an empty nodelist: a string compared with a number
+// is false (section 2.3.5.2.2), `match()` with a pattern that is not
+// I-Regexp is false (section 2.4.6), and a selector that names nothing
+// selects nothing.
 //
-// EVALUATION CANNOT FAIL, which is the fact about this package a caller
-// should learn first and the reason nothing here answers a `Result`.
-// RFC 9535 makes every runtime disagreement produce a false or an empty
-// nodelist rather than an error: § 2.3.5.2.2 says comparing a string
-// with a number is false, § 2.4.6 says `match()` with a pattern that is
-// not I-Regexp is false, and a selector that names a member nothing has
-// selects nothing.  Everything that CAN be wrong is wrong in the query,
-// and `jpquery.parse` is where it is caught.
+// The one thing that stops a walk is a bound in `JpLimits`, and it
+// does not fail either.  `select_with` answers the nodes found before
+// the bound with `truncated` set.
 //
-// The one thing that stops a walk is a resource bound, and that is not
-// a failure either: `select_with` answers a `JpSelection` with
-// `truncated` set and the nodes it found before it stopped.  A query
-// that ran out of budget produced real nodes, and discarding them to
-// raise would answer less than is known.
+// The document is the standard library's `JsonValueH`, as
+// `std.json.parse` answers it, so a document is queried where it is.
 //
-// THE VALUE IS THE STANDARD LIBRARY'S, NOT A SECOND ONE.  `JsonValueH`
-// is what `std.json.parse` answers, what `std.http`'s bodies arrive as
-// and what `nq` already walks — so a document is queried where it is,
-// with no conversion.  What that costs is written down in the README
-// under "What the standard library's JSON value cannot carry", and the
-// short version is that `{}` and `null` are the same value to every
-// accessor, which is the one place § 2.4.4's `length()` cannot be
-// answered correctly.
+// Every node carries its normalized path (section 2.7), such as
+// `$['a'][0]`: every name in single quotes, never the shorthand, so two
+// paths to one location are one string.  `select_values` builds none.
 //
-// EVERY NODE CARRIES ITS NORMALIZED PATH, § 2.7's: `$['a'][0]`, quoted
-// throughout, no shorthand.  It is the half of JSONPath that makes the
-// results usable rather than just visible — a program that selects
-// `$..price` and then wants to WRITE those locations needs to know
-// where each one was, and a bare list of values cannot say.  Building
-// it costs a string per node, so `select_values` is there for a caller
-// that does not want them.
+// The order of a nodelist is the specification's.  Within a segment,
+// each selector's results follow the one before's, and a descendant
+// segment visits a node before its children, and an array's elements
+// in order.  An object's members are visited in the order `json.keys`
+// answers them, which is the order of the document's text; RFC 9535
+// leaves that order to the implementation.
 
 use std.json
+use std.list
+use std.str
 use jperror
 use jpquery
+use jpregex
 
-// What a walk will not do.
-//
-// Bounds rather than a promise: `$..*` over a document a stranger
-// supplied is a query that visits every node, and a service accepting
-// queries from outside wants a ceiling it chose.
+// Bounds on a walk.
 pub struct JpLimits
-    // How deep into the document a descendant segment may go.
+    // How many levels below a descendant segment's input node the
+    // segment descends.
     var max_depth: Int
-    // How many nodes the result may hold before the walk stops.
+    // How many nodes a nodelist may hold.
     var max_nodes: Int
-    // How many nodes the walk may VISIT, which is the larger number
-    // and the one that bounds the cost: `$..[?@.a == 1]` visits
-    // everything and may select nothing.
+    // How many nodes the walk may visit, selected or not.
     var max_visits: Int
 
-// One selected node: the value, and where it was.
+// One selected node: its value, and where it was.
 pub struct JpNode
     value: JsonValueH
-    // The normalized path, RFC 9535 § 2.7: `$['store']['book'][0]`.
-    // Always quoted, never the shorthand, so that two paths to the same
-    // location are the same string.
+    // The normalized path, RFC 9535 section 2.7: `$['store']['book'][0]`.
     path: Str
 
 // What a bounded walk produced.
 pub struct JpSelection
     nodes: [JpNode]
-    // True when a bound in `JpLimits` stopped the walk.  The nodes
-    // above it are real; there may have been more.
+    // True when a bound stopped the walk.  The nodes are real, and
+    // there may have been more.
     truncated: Bool
     // How many nodes the walk visited, whether or not it selected
-    // them.  What a caller tuning a limit reads.
+    // them.
     visited: Int
 
-// Bounds no ordinary document reaches: 256 deep, 100,000 nodes
-// selected, a million visited.
+// Bounds no ordinary document reaches: 256 levels, 100,000 nodes in a
+// nodelist, a million visited.
 //
 // ```novo
 // use jpeval
@@ -82,16 +69,10 @@ pub struct JpSelection
 //     println("${jpeval.default_limits().max_depth}")
 // ```
 pub fn default_limits() -> JpLimits []
-    todo("jsonpath-nv.jpeval.default_limits")
+    JpLimits { max_depth: 256, max_nodes: 100000, max_visits: 1000000 }
 
-// Run a query and answer every node it selected, in the order RFC 9535
-// produces them.
-//
-// **The load-bearing call of this module**, and it answers a list
-// rather than a `Result` because evaluation cannot fail.  The order is
-// the specification's: document order within a selector, selector
-// order within a segment, so `$[2,0]` answers the third element before
-// the first.
+// Run a query and answer every node it selects, under
+// `default_limits()`.
 //
 // ```novo
 // use std.json
@@ -109,12 +90,10 @@ pub fn default_limits() -> JpLimits []
 //                 Some(doc) => println("${list.len(jpeval.select(q, doc))}")
 // ```
 pub fn select(q: jpquery.JpQuery, root: JsonValueH) -> [JpNode] []
-    todo("jsonpath-nv.jpeval.select")
+    select_with(q, root, default_limits()).nodes[:]
 
-// Run a query under bounds the caller chose.
-//
-// What a service running somebody else's query calls.  The answer says
-// whether it finished.
+// Run a query under bounds the caller chose, answering whether it
+// finished.
 //
 // ```novo
 // use std.json
@@ -133,13 +112,9 @@ pub fn select(q: jpquery.JpQuery, root: JsonValueH) -> [JpNode] []
 //                     println("${sel.truncated}")
 // ```
 pub fn select_with(q: jpquery.JpQuery, root: JsonValueH, limits: JpLimits) -> JpSelection []
-    todo("jsonpath-nv.jpeval.select_with")
+    run(q, root, limits, jpregex.no_categories, false, true)
 
 // The values alone, with no paths built.
-//
-// The cheap call: a normalized path is a string per node, and a caller
-// that is going to read the values and throw the locations away should
-// not pay for them.
 //
 // ```novo
 // use std.json
@@ -157,13 +132,12 @@ pub fn select_with(q: jpquery.JpQuery, root: JsonValueH, limits: JpLimits) -> Jp
 //                 Some(doc) => println("${list.len(jpeval.select_values(q, doc))}")
 // ```
 pub fn select_values(q: jpquery.JpQuery, root: JsonValueH) -> [JsonValueH] []
-    todo("jsonpath-nv.jpeval.select_values")
+    var out: [JsonValueH] = []
+    for n in run(q, root, default_limits(), jpregex.no_categories, false, false).nodes
+        list.push(out, n.value)
+    out
 
-// The normalized paths alone, with no values kept.
-//
-// The other half: a tool that reports WHERE something is — a linter
-// over a configuration document, a diff that names the locations that
-// changed — wants the paths and already has the document.
+// The normalized paths alone.
 //
 // ```novo
 // use std.json
@@ -181,14 +155,15 @@ pub fn select_values(q: jpquery.JpQuery, root: JsonValueH) -> [JsonValueH] []
 //                 Some(doc) => println("${list.len(jpeval.select_paths(q, doc))}")
 // ```
 pub fn select_paths(q: jpquery.JpQuery, root: JsonValueH) -> [Str] []
-    todo("jsonpath-nv.jpeval.select_paths")
+    var out: [Str] = []
+    for n in select(q, root)
+        list.push(out, n.path)
+    out
 
-// The one value a singular query selects, or `None`.
+// The first value a query selects, or `None` when it selects nothing.
 //
-// `None` for a query that matched nothing.  A query that is not
-// singular is refused at PARSE time by `jpquery.parse_singular`, so
-// this cannot be given one that might match several — which is why it
-// answers an option rather than a list and a first-of.
+// Meant for a singular query, which selects at most one node:
+// `jpquery.parse_singular` refuses any other.
 //
 // ```novo
 // use std.json
@@ -208,12 +183,9 @@ pub fn select_paths(q: jpquery.JpQuery, root: JsonValueH) -> [Str] []
 //                         None    => println("no match")
 // ```
 pub fn select_one(q: jpquery.JpQuery, root: JsonValueH) -> ?JsonValueH []
-    todo("jsonpath-nv.jpeval.select_one")
+    list.first(select_values(q, root))
 
-// Parse and run in one call, for the caller who has a query as text.
-//
-// The only function in this module that can fail, and it fails at the
-// parse.
+// Parse a query and run it, in one call.  Only the parse can fail.
 //
 // ```novo
 // use std.json
@@ -230,18 +202,17 @@ pub fn select_one(q: jpquery.JpQuery, root: JsonValueH) -> ?JsonValueH []
 //                 Ok(nodes) => println("${list.len(nodes)}")
 // ```
 pub fn query(root: JsonValueH, text: Str) -> Result<[JpNode], jperror.JpFault> []
-    todo("jsonpath-nv.jpeval.query")
+    let q = jpquery.parse(text)!
+    Ok(select(q, root))
 
-// Run a query whose filters use `\p{...}`, with the Unicode
-// general-category lookup those patterns need.
+// Run a query whose patterns use `\p{...}`, with the general-category
+// lookup they need.
 //
-// The plumbing `jpregex.compile_with` describes, carried through the
-// evaluator: `match()` and `search()` compile their pattern at the
-// point they are called, so the lookup has to reach them from here.
-// A caller whose queries use no category escape never calls this, and a
-// caller whose query does and who calls `select` instead gets `false`
-// from that function — which is § 2.4.6's answer for a pattern that is
-// not valid I-Regexp, and an unresolvable `\p{...}` is not.
+// `match()` and `search()` compile their pattern where they are called,
+// with `jpregex.compile_with` and this lookup.  Under `select` and
+// `select_with` a pattern with a category escape does not compile, and
+// the function answers false, as section 2.4.6 has it for a pattern it
+// cannot use.
 //
 // ```novo
 // use std.json
@@ -249,13 +220,12 @@ pub fn query(root: JsonValueH, text: Str) -> Result<[JpNode], jperror.JpFault> [
 // use jpquery
 //
 // fn ascii_category(ch: Int) -> Str
-//     if ch >= 97 && ch <= 122
-//         "Ll"
-//     else
-//         "Cn"
+//     if ch >= 97 and ch <= 122
+//         return "Ll"
+//     "Cn"
 //
 // fn main() [io]
-//     match jpquery.parse("$[?match(@.n, '\\p{L}+')]")
+//     match jpquery.parse("$[?match(@.n, '\\\\p{L}+')]")
 //         Err(_) =>
 //             println("did not parse")
 //         Ok(q)  =>
@@ -268,7 +238,7 @@ pub fn query(root: JsonValueH, text: Str) -> Result<[JpNode], jperror.JpFault> [
 // ```
 pub fn select_categorised(q: jpquery.JpQuery, root: JsonValueH, limits: JpLimits,
                           category_of: fn(Int) -> Str) -> JpSelection []
-    todo("jsonpath-nv.jpeval.select_categorised")
+    run(q, root, limits, category_of, true, true)
 
 // One step of a normalized path.
 pub struct JpStep
@@ -276,15 +246,10 @@ pub struct JpStep
     name: Str
     // The element index, for a step into an array.
     index: Int
-    // Which of the two this step is.
+    // Whether this step is an index.
     is_index: Bool
 
-// The normalized path of a location given as a list of steps.
-//
-// For a caller BUILDING a path rather than reading one — a program that
-// knows it wants `$['a'][0]` and would rather not spell the quoting
-// rules itself.  A step is a member name or an index, and
-// `is_index` says which.
+// The normalized path of a list of steps.
 //
 // ```novo
 // use jpeval
@@ -294,7 +259,10 @@ pub struct JpStep
 //     println(jpeval.normalized_path(steps))
 // ```
 pub fn normalized_path(steps: [JpStep]) -> Str []
-    todo("jsonpath-nv.jpeval.normalized_path")
+    var out = "$"
+    for s in steps
+        out = out + step_text(s)
+    out
 
 // A step into an object member.
 //
@@ -305,7 +273,7 @@ pub fn normalized_path(steps: [JpStep]) -> Str []
 //     println(jpeval.name_step("a").name)
 // ```
 pub fn name_step(name: Str) -> JpStep []
-    todo("jsonpath-nv.jpeval.name_step")
+    JpStep { name: name, index: 0, is_index: false }
 
 // A step into an array element.
 //
@@ -316,13 +284,13 @@ pub fn name_step(name: Str) -> JpStep []
 //     println("${jpeval.index_step(3).index}")
 // ```
 pub fn index_step(index: Int) -> JpStep []
-    todo("jsonpath-nv.jpeval.index_step")
+    JpStep { name: "", index: index, is_index: true }
 
-// A normalized path parsed back into its steps, or `None` when the
-// string is not one.
+// A normalized path read back into its steps, or `None` when the text
+// is not one.
 //
-// The inverse, so a program that stored a path can walk to it again
-// without re-running the query that found it.
+// A name is in single quotes with section 2.7's escapes, and an index
+// is a non-negative integer with no leading zero.
 //
 // ```novo
 // use std.list
@@ -334,13 +302,36 @@ pub fn index_step(index: Int) -> JpStep []
 //         None        => println("not a normalized path")
 // ```
 pub fn path_steps(path: Str) -> ?[JpStep] []
-    todo("jsonpath-nv.jpeval.path_steps")
+    if str.byte_at_or(path, 0, 0) != '$'
+        return None
+    var steps: [JpStep] = []
+    let n = str.len(path)
+    var i = 1
+    loop
+        if i >= n
+            return Some(steps)
+        if str.byte_at_or(path, i, 0) != '['
+            return None
+        let c = str.byte_at_or(path, i + 1, 0)
+        if c == '\''
+            let close = name_end(path, i + 2)
+            if close < 0 or str.byte_at_or(path, close + 1, 0) != ']'
+                return None
+            let name = unescape(str.slice(path, i + 2, close))
+            match name
+                Some(s) => list.push(steps, name_step(s))
+                None    =>
+                    return None
+            i = close + 2
+        else
+            let close = str.index_from(path, "]", i) ?? n
+            let text = str.slice(path, i + 1, close)
+            if close >= n or not index_text(text)
+                return None
+            list.push(steps, index_step(str.to_int(text) ?? 0))
+            i = close + 1
 
 // The value at a normalized path, or `None`.
-//
-// Cheaper than running a query, because a normalized path is a walk
-// with no branching in it.  What a program does with a path it stored
-// earlier.
 //
 // ```novo
 // use std.json
@@ -356,20 +347,34 @@ pub fn path_steps(path: Str) -> ?[JpStep] []
 //                 None    => println("nothing there")
 // ```
 pub fn at_path(root: JsonValueH, path: Str) -> ?JsonValueH []
-    todo("jsonpath-nv.jpeval.at_path")
+    let steps = path_steps(path) ?? []
+    if list.len(steps) == 0 and path != "$"
+        return None
+    var cur = root
+    for s in steps
+        if s.is_index
+            match json.index(cur, s.index)
+                Some(v) =>
+                    cur = v
+                None    =>
+                    return None
+        else
+            if json.type_of(cur) != "object"
+                return None
+            match json.get(cur, s.name)
+                Some(v) =>
+                    cur = v
+                None    =>
+                    return None
+    Some(cur)
 
-// Compare two JSON values by RFC 9535 § 2.3.5.2.2.
+// Whether two JSON values are equal by RFC 9535 section 2.3.5.2.2.
 //
-// Structural: two arrays are equal when they have the same length and
-// equal members in order, two objects when they have the same member
-// names and equal values, and `1` and `1.0` are equal because they are
-// the same JSON number.  Nothing else is equal to anything of a
-// different type.
-//
-// Public because it is the one piece of RFC 9535 that a caller is
-// likely to want on its own — a test asserting that two documents mean
-// the same thing — and because the standard library has no
-// `json.equals` to defer to.  The README says what that costs.
+// Two numbers are equal when their values are, so `1` equals `1.0`.
+// Two arrays are equal when their elements are, in order, and two
+// objects when they have the same member names with equal values, in
+// any order.  Values of different types are not equal.  This is
+// `std.json.equals`.
 //
 // ```novo
 // use std.json
@@ -385,15 +390,14 @@ pub fn at_path(root: JsonValueH, path: Str) -> ?JsonValueH []
 //                 Some(b) => println("${jpeval.value_equals(a, b)}")
 // ```
 pub fn value_equals(a: JsonValueH, b: JsonValueH) -> Bool []
-    todo("jsonpath-nv.jpeval.value_equals")
+    json.equals(a, b)
 
-// Order two JSON values by RFC 9535 § 2.3.5.2.2's `<`.
+// Order two JSON values by RFC 9535 section 2.3.5.2.2's `<`: -1, 0 or
+// 1.
 //
-// `-1`, `0` or `1`, and `0` ALSO for the incomparable pairs — a string
-// and a number, an array and anything — because the specification makes
-// `<` false in both directions for those rather than defining an order.
-// A caller that needs to know which of the two it got asks
-// `value_comparable` first.
+// Two numbers compare by value and two strings by their Unicode scalar
+// values.  Every other pair answers 0, since `<` is false both ways
+// between them; `value_comparable` tells that 0 from equality.
 //
 // ```novo
 // use std.json
@@ -409,12 +413,16 @@ pub fn value_equals(a: JsonValueH, b: JsonValueH) -> Bool []
 //                 Some(b) => println("${jpeval.value_order(a, b)}")
 // ```
 pub fn value_order(a: JsonValueH, b: JsonValueH) -> Int []
-    todo("jsonpath-nv.jpeval.value_order")
+    let va = lit_of(a)
+    let vb = lit_of(b)
+    if less(va, vb)
+        return 0 - 1
+    if less(vb, va)
+        return 1
+    0
 
-// Whether `<` is defined between these two values at all.
-//
-// True only for two numbers and for two strings, which is the whole of
-// § 2.3.5.2.2's ordering.
+// Whether `<` is defined between two values: both numbers, or both
+// strings.
 //
 // ```novo
 // use std.json
@@ -430,4 +438,491 @@ pub fn value_order(a: JsonValueH, b: JsonValueH) -> Int []
 //                 Some(b) => println("${jpeval.value_comparable(a, b)}")
 // ```
 pub fn value_comparable(a: JsonValueH, b: JsonValueH) -> Bool []
-    todo("jsonpath-nv.jpeval.value_comparable")
+    let ta = json.type_of(a)
+    ta == json.type_of(b) and (ta == "number" or ta == "string")
+
+// ── The walk ─────────────────────────────────────────────────────────
+
+// The state of one run: its root, bounds, category lookup, whether
+// paths are built, and what it has visited.
+struct Ctx
+    root: JsonValueH
+    limits: JpLimits
+    category_of: fn(Int) -> Str
+    has_categories: Bool
+    paths: Bool
+    var visited: Int
+    var truncated: Bool
+
+// Run a query.
+fn run(q: jpquery.JpQuery, root: JsonValueH, limits: JpLimits, category_of: fn(Int) -> Str,
+       has_categories: Bool, paths: Bool) -> JpSelection
+    var ctx = Ctx { root: root, limits: limits, category_of: category_of,
+                    has_categories: has_categories, paths: paths, visited: 0, truncated: false }
+    let start = JpNode { value: root, path: "$" }
+    let nodes = eval_query(ctx, q, start)
+    JpSelection { nodes: nodes, truncated: ctx.truncated, visited: ctx.visited }
+
+// A query's nodelist, from `current` for a relative query and from the
+// root for an absolute one.
+fn eval_query(var ctx: Ctx, q: jpquery.JpQuery, current: JpNode) -> [JpNode]
+    var nodes: [JpNode] = []
+    if q.absolute
+        list.push(nodes, JpNode { value: ctx.root, path: "$" })
+    else
+        list.push(nodes, current)
+    for seg in q.segments
+        nodes = eval_segment(ctx, seg, nodes)
+    nodes
+
+// One segment over a nodelist.
+fn eval_segment(var ctx: Ctx, seg: jpquery.JpSegment, input: [JpNode]) -> [JpNode]
+    var out: [JpNode] = []
+    match seg
+        JpChildSeg(sels)      =>
+            for n in input
+                for s in sels
+                    apply(ctx, s, n, out)
+        JpDescendantSeg(sels) =>
+            for n in input
+                var ds: [JpNode] = []
+                descendants(ctx, n, 0, ds)
+                for d in ds
+                    for s in sels
+                        apply(ctx, s, d, out)
+    out
+
+// A node and all of its descendants, a node before its children, up
+// to `max_depth` levels below the first.
+fn descendants(var ctx: Ctx, n: JpNode, level: Int, var out: [JpNode])
+    if not visit(ctx)
+        return
+    list.push(out, n)
+    let kids = children(ctx, n)
+    if list.len(kids) > 0 and level >= ctx.limits.max_depth
+        ctx.truncated = true
+        return
+    for k in kids
+        descendants(ctx, k, level + 1, out)
+
+// Count one visited node, answering false once the bound is passed.
+fn visit(var ctx: Ctx) -> Bool
+    if ctx.visited >= ctx.limits.max_visits
+        ctx.truncated = true
+        return false
+    ctx.visited = ctx.visited + 1
+    true
+
+// Add a node to a nodelist, unless the nodelist is full.
+fn add(var ctx: Ctx, var out: [JpNode], n: JpNode)
+    if list.len(out) >= ctx.limits.max_nodes
+        ctx.truncated = true
+        return
+    list.push(out, n)
+
+// The children of a node: an object's members in `json.keys` order, an
+// array's elements in order, and nothing for any other value.
+fn children(ctx: Ctx, n: JpNode) -> [JpNode]
+    var out: [JpNode] = []
+    let t = json.type_of(n.value)
+    if t == "object"
+        for k in json.keys(n.value)
+            let v = json.get(n.value, k)!
+            list.push(out, JpNode { value: v, path: child_path(ctx, n, name_step(k)) })
+    else if t == "array"
+        for i in 0..(json.len(n.value) ?? 0)
+            let v = json.index(n.value, i)!
+            list.push(out, JpNode { value: v, path: child_path(ctx, n, index_step(i)) })
+    out
+
+// The path of a child, or the empty string when paths are not built.
+fn child_path(ctx: Ctx, n: JpNode, s: JpStep) -> Str
+    if not ctx.paths
+        return ""
+    n.path + step_text(s)
+
+// One selector applied to one node, its results appended to `out`.
+fn apply(var ctx: Ctx, s: jpquery.JpSelector, n: JpNode, var out: [JpNode])
+    let t = json.type_of(n.value)
+    match s
+        JpNameSel(name) =>
+            if t == "object"
+                match json.get(n.value, name)
+                    Some(v) => add(ctx, out, JpNode { value: v, path: child_path(ctx, n, name_step(name)) })
+                    None    => ()
+        JpWildcardSel   =>
+            for k in children(ctx, n)
+                if visit(ctx)
+                    add(ctx, out, k)
+        JpIndexSel(i)   =>
+            if t == "array"
+                let len = json.len(n.value) ?? 0
+                let at = if i < 0
+                    len + i
+                else
+                    i
+                match json.index(n.value, at)
+                    Some(v) => add(ctx, out, JpNode { value: v, path: child_path(ctx, n, index_step(at)) })
+                    None    => ()
+        JpSliceSel(b)   =>
+            if t == "array"
+                for i in slice_indices(b, json.len(n.value) ?? 0)
+                    let v = json.index(n.value, i)!
+                    add(ctx, out, JpNode { value: v, path: child_path(ctx, n, index_step(i)) })
+        JpFilterSel(e)  =>
+            for k in children(ctx, n)
+                if visit(ctx) and eval_expr(ctx, e, k)
+                    add(ctx, out, k)
+
+// The indices a slice selects from an array of `len` elements, in
+// order, by RFC 9535 section 2.3.4.2.2.
+fn slice_indices(b: jpquery.JpSlice, len: Int) -> [Int]
+    let step = b.step ?? 1
+    var out: [Int] = []
+    if step > 0
+        let lower = clamp(norm(b.start ?? 0, len), 0, len)
+        let upper = clamp(norm(b.end ?? len, len), 0, len)
+        var i = lower
+        for _ in 0..len + 1
+            if i >= upper
+                break
+            list.push(out, i)
+            i = i + step
+    else if step < 0
+        let upper = clamp(norm(b.start ?? len - 1, len), 0 - 1, len - 1)
+        let lower = clamp(norm(b.end ?? 0 - len - 1, len), 0 - 1, len - 1)
+        var i = upper
+        for _ in 0..len + 1
+            if i <= lower
+                break
+            list.push(out, i)
+            i = i + step
+    out
+
+// An index counted from the end when negative.
+fn norm(i: Int, len: Int) -> Int
+    if i < 0
+        return len + i
+    i
+
+// A number held between two bounds.
+fn clamp(x: Int, lo: Int, hi: Int) -> Int
+    if x < lo
+        return lo
+    if x > hi
+        return hi
+    x
+
+// ── Filters ──────────────────────────────────────────────────────────
+
+// A value in a filter: a JSON value, a literal, or Nothing.
+enum Val
+    VNothing
+    // An object or an array from the document.
+    VJson(v: JsonValueH)
+    // A primitive, from a literal or from the document.
+    VLit(l: jpquery.JpLiteral)
+
+// Whether a logical expression is true of the current node.
+fn eval_expr(var ctx: Ctx, e: jpquery.JpExpr, current: JpNode) -> Bool
+    match e
+        JpExprOr(a, b)          => eval_expr(ctx, a, current) or eval_expr(ctx, b, current)
+        JpExprAnd(a, b)         => eval_expr(ctx, a, current) and eval_expr(ctx, b, current)
+        JpExprNot(a)            => not eval_expr(ctx, a, current)
+        JpExprTest(q)           => list.len(inner_query(ctx, q, current)) > 0
+        JpExprCompare(l, op, r) => compare(operand(ctx, l, current), op, operand(ctx, r, current))
+        JpExprCall(c)           => logical_call(ctx, c, current)
+
+// A query inside a filter, with no paths built.
+fn inner_query(var ctx: Ctx, q: jpquery.JpQuery, current: JpNode) -> [JpNode]
+    var inner = Ctx { root: ctx.root, limits: ctx.limits, category_of: ctx.category_of,
+                      has_categories: ctx.has_categories, paths: false,
+                      visited: ctx.visited, truncated: ctx.truncated }
+    let nodes = eval_query(inner, q, current)
+    ctx.visited = inner.visited
+    ctx.truncated = inner.truncated
+    nodes
+
+// The value of a comparison's operand.
+fn operand(var ctx: Ctx, o: jpquery.JpOperand, current: JpNode) -> Val
+    match o
+        JpOperandLiteral(l) => VLit(l)
+        JpOperandQuery(q)   => first_value(inner_query(ctx, q, current))
+        JpOperandCall(c)    => value_call(ctx, c, current)
+
+// The one value of a nodelist, or Nothing when it has none.
+fn first_value(nodes: [JpNode]) -> Val
+    match list.first(nodes)
+        Some(n) => val_of(n.value)
+        None    => VNothing
+
+// A document value as a filter value.
+fn val_of(v: JsonValueH) -> Val
+    let t = json.type_of(v)
+    if t == "object" or t == "array"
+        return VJson(v)
+    VLit(lit_of(v))
+
+// A primitive document value as a literal.  An object or an array
+// answers `null`, and no caller passes one.
+fn lit_of(v: JsonValueH) -> jpquery.JpLiteral
+    let t = json.type_of(v)
+    if t == "string"
+        return JpLitStr(json.to_str(v) ?? "")
+    if t == "number"
+        let text = json.stringify(v)
+        if str.contains(text, ".") or str.contains(text, "e") or str.contains(text, "E")
+            return JpLitFloat(json.to_float(v) ?? 0.0)
+        return JpLitInt(json.to_int(v) ?? 0)
+    if t == "boolean"
+        if json.to_bool(v) ?? false
+            return JpLitTrue
+        return JpLitFalse
+    JpLitNull
+
+// A comparison, by RFC 9535 section 2.3.5.2.2.
+fn compare(a: Val, op: jpquery.JpCompareOp, b: Val) -> Bool
+    match op
+        JpOpEq => equal(a, b)
+        JpOpNe => not equal(a, b)
+        JpOpLt => less_val(a, b)
+        JpOpLe => less_val(a, b) or equal(a, b)
+        JpOpGt => less_val(b, a)
+        JpOpGe => less_val(b, a) or equal(a, b)
+
+// Whether two filter values are equal.  Two Nothings are.
+fn equal(a: Val, b: Val) -> Bool
+    match a
+        VNothing =>
+            match b
+                VNothing => true
+                _        => false
+        VJson(x) =>
+            match b
+                VJson(y) => json.equals(x, y)
+                _        => false
+        VLit(x)  =>
+            match b
+                VLit(y) => lit_equal(x, y)
+                _       => false
+
+// Whether two literals are equal.
+fn lit_equal(a: jpquery.JpLiteral, b: jpquery.JpLiteral) -> Bool
+    match a
+        JpLitStr(x) =>
+            match b
+                JpLitStr(y) => x == y
+                _           => false
+        JpLitTrue   =>
+            match b
+                JpLitTrue => true
+                _         => false
+        JpLitFalse  =>
+            match b
+                JpLitFalse => true
+                _          => false
+        JpLitNull   =>
+            match b
+                JpLitNull => true
+                _         => false
+        _           => numbers_equal(a, b)
+
+// Whether two numeric literals are equal: exactly for two integers, by
+// value otherwise.  False when either is not a number.
+fn numbers_equal(a: jpquery.JpLiteral, b: jpquery.JpLiteral) -> Bool
+    match (a, b)
+        (JpLitInt(x), JpLitInt(y)) => x == y
+        _                          =>
+            match (float_of(a), float_of(b))
+                (Some(x), Some(y)) => x == y
+                _                  => false
+
+// A numeric literal as a float, or `None` for any other literal.
+fn float_of(l: jpquery.JpLiteral) -> ?Float
+    match l
+        JpLitInt(n)   => Some(n as Float)
+        JpLitFloat(f) => Some(f)
+        _             => None
+
+// Whether `a < b` for two filter values.
+fn less_val(a: Val, b: Val) -> Bool
+    match (a, b)
+        (VLit(x), VLit(y)) => less(x, y)
+        _                  => false
+
+// Whether `a < b` for two literals: two numbers by value, two strings
+// by their Unicode scalar values, and false for any other pair.
+fn less(a: jpquery.JpLiteral, b: jpquery.JpLiteral) -> Bool
+    match (a, b)
+        (JpLitInt(x), JpLitInt(y)) => x < y
+        (JpLitStr(x), JpLitStr(y)) => x < y
+        _                          =>
+            match (float_of(a), float_of(b))
+                (Some(x), Some(y)) => x < y
+                _                  => false
+
+// ── Functions ────────────────────────────────────────────────────────
+
+// A function call whose result is a value: `length`, `count` or
+// `value`.
+fn value_call(var ctx: Ctx, c: jpquery.JpCall, current: JpNode) -> Val
+    match c.function
+        JpFnCount =>
+            VLit(JpLitInt(list.len(arg_nodes(ctx, c.arguments[0], current))))
+        JpFnValue =>
+            let nodes = arg_nodes(ctx, c.arguments[0], current)
+            if list.len(nodes) != 1
+                return VNothing
+            first_value(nodes)
+        _         => length_of(arg_value(ctx, c.arguments[0], current))
+
+// `length()` of a value: a string's characters, an object's members or
+// an array's elements, and Nothing for anything else.
+fn length_of(v: Val) -> Val
+    match v
+        VLit(JpLitStr(s)) => VLit(JpLitInt(char_count(s)))
+        VJson(j)          => VLit(JpLitInt(json.len(j) ?? 0))
+        _                 => VNothing
+
+// A function call whose result is logical: `match` or `search`.
+fn logical_call(var ctx: Ctx, c: jpquery.JpCall, current: JpNode) -> Bool
+    let text = arg_value(ctx, c.arguments[0], current)
+    let pattern = arg_value(ctx, c.arguments[1], current)
+    match (text, pattern)
+        (VLit(JpLitStr(s)), VLit(JpLitStr(pat))) => regex_test(ctx, pat, s, c.function)
+        _                                        => false
+
+// Whether a pattern matches a string, whole for `match()` and anywhere
+// for `search()`.  A pattern that does not compile matches nothing.
+fn regex_test(ctx: Ctx, pat: Str, s: Str, f: jpquery.JpFunction) -> Bool
+    let compiled = if ctx.has_categories
+        jpregex.compile_with(pat, ctx.category_of)
+    else
+        jpregex.compile(pat)
+    match compiled
+        Ok(re) =>
+            match f
+                JpFnMatch => jpregex.is_match(re, s)
+                _         => jpregex.search(re, s)
+        Err(_) => false
+
+// An argument's value, for a parameter of value type.
+fn arg_value(var ctx: Ctx, a: jpquery.JpArgument, current: JpNode) -> Val
+    match a
+        JpArgLiteral(l) => VLit(l)
+        JpArgQuery(q)   => first_value(inner_query(ctx, q, current))
+        JpArgCall(c)    => value_call(ctx, c, current)
+        JpArgLogical(_) => VNothing
+
+// An argument's nodelist, for a parameter of nodelist type.
+fn arg_nodes(var ctx: Ctx, a: jpquery.JpArgument, current: JpNode) -> [JpNode]
+    match a
+        JpArgQuery(q) => inner_query(ctx, q, current)
+        _             => []
+
+// How many Unicode scalar values a string holds: its bytes that do not
+// continue a UTF-8 sequence.
+fn char_count(s: Str) -> Int
+    var n = 0
+    for i in 0..str.len(s)
+        if (str.byte_at_or(s, i, 0) & 0xC0) != 0x80
+            n = n + 1
+    n
+
+// ── Paths ────────────────────────────────────────────────────────────
+
+// One step as a normalized path writes it.
+fn step_text(s: JpStep) -> Str
+    if s.is_index
+        return "[${s.index}]"
+    "[" + jpquery.quote(s.name) + "]"
+
+// The offset of the `'` that closes a quoted name whose text starts at
+// `from`, or -1.
+fn name_end(path: Str, from: Int) -> Int
+    var i = from
+    loop
+        if i >= str.len(path)
+            return 0 - 1
+        let b = str.byte_at_or(path, i, 0)
+        if b == '\''
+            return i
+        if b == '\\'
+            i = i + 2
+        else
+            i = i + 1
+
+// A quoted name's text with section 2.7's escapes decoded, or `None`
+// for an escape it does not define.
+fn unescape(s: Str) -> ?Str
+    var out = ""
+    var i = 0
+    let n = str.len(s)
+    for _ in 0..n
+        if i >= n
+            break
+        let b = str.byte_at_or(s, i, 0)
+        if b != '\\'
+            out = out + str.from_byte(b)
+            i = i + 1
+            continue
+        let c = str.byte_at_or(s, i + 1, 0)
+        let simple = escaped_byte(c)
+        if simple >= 0
+            out = out + str.from_byte(simple)
+            i = i + 2
+        else if c == 'u'
+            let hex = str.slice(s, i + 2, i + 6)
+            match hex_int(hex)
+                Some(v) =>
+                    out = out + str.from_char(v)
+                None    =>
+                    return None
+            i = i + 6
+        else
+            return None
+    Some(out)
+
+// The byte a one-letter escape of a normalized path stands for, or -1.
+fn escaped_byte(c: Int) -> Int
+    if c == 'b'
+        return 8
+    if c == 'f'
+        return 12
+    if c == 'n'
+        return 10
+    if c == 'r'
+        return 13
+    if c == 't'
+        return 9
+    if c == '\'' or c == '\\'
+        return c
+    0 - 1
+
+// Four hexadecimal digits as a number, or `None`.
+fn hex_int(h: Str) -> ?Int
+    if str.len(h) != 4
+        return None
+    var v = 0
+    for i in 0..4
+        let b = str.byte_at_or(h, i, 0)
+        var d = 0 - 1
+        if b >= '0' and b <= '9'
+            d = b - '0'
+        else if b >= 'a' and b <= 'f'
+            d = b - 'a' + 10
+        if d < 0
+            return None
+        v = v * 16 + d
+    Some(v)
+
+// Whether text is a non-negative integer with no leading zero.
+fn index_text(t: Str) -> Bool
+    let n = str.len(t)
+    if n == 0 or n > 1 and str.byte_at_or(t, 0, 0) == '0'
+        return false
+    for i in 0..n
+        let b = str.byte_at_or(t, i, 0)
+        if b < '0' or b > '9'
+            return false
+    true
