@@ -1,22 +1,9 @@
-// jpeval_tests.nv — the API suite for the evaluator, the normalized
-// paths and the I-Regexp subset.
+// jpeval_tests.nv — the evaluator, normalized paths and I-Regexp.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: jsonpath-nv.<module>.<fn>`.
-//
-// THE DOCUMENT AND THE EXPECTED NODE LISTS ARE RFC 9535 § 1.5's OWN.
-// The specification opens with a bookstore — two books, a bicycle,
-// prices and authors — and a table of queries against it with the exact
-// result each must produce.  Those are the assertions below, quoted so
-// a reviewer can check them against the RFC rather than against this
-// package, and the JSONPath Compliance Test Suite becomes a generated
-// run beside this one when the implementation lands.
-//
-// THE ORDER CASES MATTER AS MUCH AS THE CONTENTS.  § 2.5.1.2 makes a
-// segment's result the concatenation of its selectors' results IN
-// SELECTOR ORDER, so `$[2,0]` answers the third element before the
-// first; an implementation that sorted by document order would pass
-// every "how many" assertion and fail every "which one first".
+// The document and the expected nodelists are RFC 9535 section 1.5's
+// bookstore and its table of queries.  The order cases follow section
+// 2.5.1.2: a segment's result is its selectors' results in selector
+// order, so `$[2,0]` answers the third element before the first.
 
 use std.test
 use std.list
@@ -24,6 +11,7 @@ use std.json
 use jpquery
 use jpeval
 use jpregex
+use std.str
 
 // RFC 9535 § 1.5's bookstore, reduced to the members the assertions
 // name.
@@ -81,7 +69,7 @@ fn test_the_queries_rfc_9535_section_1_5_tabulates() [io]
 fn test_the_order_is_the_specification_s_and_not_document_order() [io]
     let src = "{\"a\":[10,20,30]}"
 
-    test.case("a segment's selectors answer in SELECTOR order")
+    test.case("a segment's selectors answer in selector order")
     let picked = nodes("$.a[2,0]", src)
     test.assert(list.len(picked) == 2)
     test.assert(list.get(picked, 0).path == "$['a'][2]")
@@ -145,7 +133,7 @@ fn test_evaluation_cannot_fail() [io]
     test.case("a filter over a value that is not an object is false")
     test.assert(list.len(nodes("$[?@.a]", "[1,2,3]")) == 0)
 
-    test.case("the one call that CAN fail is the one that parses")
+    test.case("the one call that can fail is the one that parses")
     match jpeval.query(doc("{\"a\":1}"), "not a query")
         Ok(_)  => test.assert(false)
         Err(f) => test.assert(f.at >= 0)
@@ -211,6 +199,7 @@ fn test_comparison_is_structural_and_numbers_are_not_spellings() [io]
     test.assert(jpeval.value_comparable(doc("1"), doc("\"a\"")) == false)
     test.assert(jpeval.value_comparable(doc("[1]"), doc("[2]")) == false)
     test.assert(jpeval.value_order(doc("1"), doc("2")) == 0 - 1)
+    test.assert(jpeval.value_order(doc("\"b\""), doc("\"a\"")) == 1)
     test.assert(jpeval.value_order(doc("1"), doc("\"a\"")) == 0)
 
 @test
@@ -272,7 +261,7 @@ fn lowercase_category(ch: Int) -> Str
 @test
 fn test_a_filter_can_be_given_the_category_lookup_it_needs() [io]
     test.case("the plumbing reaches match() and search() from the evaluator")
-    match jpquery.parse("$[?match(@.n, '\\p{L}+')]")
+    match jpquery.parse("$[?match(@.n, '\\\\p{L}+')]")
         Err(_) =>
             test.assert(false)
         Ok(q)  =>
@@ -282,8 +271,137 @@ fn test_a_filter_can_be_given_the_category_lookup_it_needs() [io]
             test.assert(list.len(sel.nodes) == 1)
 
     test.case("and without it that filter is false, which is section 2.4.6")
-    match jpquery.parse("$[?match(@.n, '\\p{L}+')]")
+    match jpquery.parse("$[?match(@.n, '\\\\p{L}+')]")
         Err(_) =>
             test.assert(false)
         Ok(q)  =>
             test.assert(list.len(jpeval.select(q, doc("[{\"n\":\"ada\"}]"))) == 0)
+
+// The paths a query selects, joined with a space.
+fn paths_of(text: Str, source: Str) -> Str [io]
+    var out: [Str] = []
+    for n in nodes(text, source)
+        list.push(out, n.path)
+    str.join(out, " ")
+
+@test
+fn test_normalized_paths_are_read_strictly() [io]
+    test.case("an escaped name reads back")
+    match jpeval.path_steps("$['a\\'b\\\\c\\b\\f\\n\\r\\t\\u001f\\u00e9']")
+        Some(steps) => test.assert(steps[0].name == "a'b\\c\u{8}\u{c}\n\r\t\u{1f}é")
+        None        => test.assert(false)
+
+    test.case("the root alone has no steps")
+    match jpeval.path_steps("$")
+        Some(steps) => test.assert(list.len(steps) == 0)
+        None        => test.assert(false)
+    match jpeval.at_path(doc("[1]"), "$")
+        Some(v) => test.assert(json.len(v) == Some(1))
+        None    => test.assert(false)
+
+    test.case("what is not a normalized path is refused")
+    for bad in ["a", "$.a", "$['a'", "$['a]", "$['a'x", "$['\\q']", "$['\\u12']", "$['\\uzzzz']",
+                "$[01]", "$[-1]", "$[1", "$[]", "$['a\\"]
+        test.assert(jpeval.path_steps(bad) == None)
+    test.assert(jpeval.at_path(doc("{\"a\":1}"), "$.a") == None)
+
+    test.case("a path through the wrong kind of value leads nowhere")
+    test.assert(jpeval.at_path(doc("[1]"), "$['a']") == None)
+    test.assert(jpeval.at_path(doc("{\"a\":1}"), "$[0]") == None)
+
+    test.case("a name with control characters is written with section 2.7's escapes")
+    test.assert(jpeval.normalized_path([jpeval.name_step("a\u{1}\tb")]) == "$['a\\u0001\\tb']")
+
+@test
+fn test_the_bounds_stop_a_walk() [io]
+    let src = "{\"a\":{\"b\":{\"c\":{\"d\":1}}},\"e\":[1,2,3]}"
+    let q = jpquery.parse("$..*")!
+
+    test.case("a depth bound stops a descendant segment and says so")
+    var shallow = jpeval.default_limits()
+    shallow.max_depth = 1
+    let d = jpeval.select_with(q, doc(src), shallow)
+    test.assert(d.truncated)
+    test.assert(list.len(d.nodes) == 6)
+
+    test.case("a visit bound stops the walk")
+    var few = jpeval.default_limits()
+    few.max_visits = 3
+    let v = jpeval.select_with(q, doc(src), few)
+    test.assert(v.truncated)
+    test.assert(v.visited == 3)
+
+    test.case("a wildcard and a filter count their visits too")
+    let w = jpeval.select_with(jpquery.parse("$.e[*]")!, doc(src), few)
+    test.assert(list.len(w.nodes) == 3)
+    var two = jpeval.default_limits()
+    two.max_visits = 2
+    let f = jpeval.select_with(jpquery.parse("$.e[?@ > 1]")!, doc(src), two)
+    test.assert(f.truncated)
+    test.assert(list.len(f.nodes) == 1)
+
+    test.case("a node bound truncates a nodelist")
+    var one = jpeval.default_limits()
+    one.max_nodes = 1
+    let n = jpeval.select_with(jpquery.parse("$.e[0,1]")!, doc(src), one)
+    test.assert(n.truncated)
+    test.assert(list.len(n.nodes) == 1)
+
+@test
+fn test_filters_compare_by_rfc_9535() [io]
+    let src = "[{\"a\":{\"x\":1}},{\"a\":[1]},{\"a\":\"b\"},{\"a\":true},{\"a\":false},{\"a\":null},{\"a\":2.5},{\"a\":3},{}]"
+
+    test.case("an object or array compares equal only to an equal object or array")
+    test.assert(paths_of("$[?@.a == $[0].a]", src) == "$[0]")
+    test.assert(paths_of("$[?@.a == 1]", src) == "")
+    test.assert(paths_of("$[?@.a == $[1].a]", src) == "$[1]")
+
+    test.case("the three literal words, and a missing member compared with one")
+    test.assert(paths_of("$[?@.a == true]", src) == "$[3]")
+    test.assert(paths_of("$[?@.a == false]", src) == "$[4]")
+    test.assert(paths_of("$[?@.a == null]", src) == "$[5]")
+    test.assert(paths_of("$[?@.a != null]", src) == "$[0] $[1] $[2] $[3] $[4] $[6] $[7] $[8]")
+    test.assert(paths_of("$[?@.b == @.c]", src) == "$[0] $[1] $[2] $[3] $[4] $[5] $[6] $[7] $[8]")
+
+    test.case("numbers compare across spellings, and strings by code point")
+    test.assert(paths_of("$[?@.a >= 2.5]", src) == "$[6] $[7]")
+    test.assert(paths_of("$[?@.a < 3.0]", src) == "$[6]")
+    test.assert(paths_of("$[?@.a == 3.0]", src) == "$[7]")
+    test.assert(paths_of("$[?@.a > 'a']", src) == "$[2]")
+    test.assert(paths_of("$[?@.a <= 99999999999999999999]", src) == "$[6] $[7]")
+    test.assert(paths_of("$[?@.a == true && @.a < 1]", src) == "")
+
+    test.case("an object's members are filtered in document order")
+    test.assert(paths_of("$[0][?@ == 1]", src) == "")
+    test.assert(paths_of("$[0].a[?@ == 1]", src) == "$[0]['a']['x']")
+
+@test
+fn test_the_functions_answer_nothing_where_the_rfc_says() [io]
+    let src = "[{\"s\":\"héllo\",\"o\":{\"k\":1,\"l\":2},\"n\":5}]"
+
+    test.case("length counts characters, members and elements, and is Nothing for a number")
+    test.assert(paths_of("$[?length(@.s) == 5]", src) == "$[0]")
+    test.assert(paths_of("$[?length(@.o) == 2]", src) == "$[0]")
+    test.assert(paths_of("$[?length(@.n) == 1]", src) == "")
+    test.assert(paths_of("$[?length('ab') == 2]", src) == "$[0]")
+
+    test.case("value is Nothing unless exactly one node")
+    test.assert(paths_of("$[?value(@.o.*) == 1]", src) == "")
+    test.assert(paths_of("$[?value(@.o.k) == 1]", src) == "$[0]")
+
+    test.case("match and search are false for anything but two strings")
+    test.assert(paths_of("$[?match(@.n, '5')]", src) == "")
+    test.assert(paths_of("$[?search(@.s, 'll')]", src) == "$[0]")
+    test.assert(paths_of("$[?match(@.s, '(')]", src) == "")
+
+    test.case("a query built in code that is not well typed evaluates to Nothing")
+    let s = JpQuery { absolute: false, segments: [JpChildSeg([JpNameSel("s")])] }
+    let odd = JpCall { function: JpFnLength, arguments: [JpArgLogical(JpExprTest(s))] }
+    let odd_count = JpCall { function: JpFnCount, arguments: [JpArgLiteral(JpLitInt(1))] }
+    let q = JpQuery { absolute: true, segments: [JpChildSeg([JpFilterSel(
+        JpExprOr(JpExprCompare(JpOperandCall(odd), JpOpEq, JpOperandLiteral(JpLitInt(1))),
+                 JpExprCompare(JpOperandCall(odd_count), JpOpEq, JpOperandLiteral(JpLitInt(1)))))])] }
+    test.assert(list.len(jpeval.select(q, doc(src))) == 0)
+
+    test.case("the empty lookup knows no category")
+    test.assert(jpregex.no_categories('A') == "Cn")

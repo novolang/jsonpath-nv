@@ -1,0 +1,127 @@
+// jprender_tests.nv — a query written back out, and the checks a query
+// built in code gets.
+
+use std.test
+use std.list
+use jperror
+use jpquery
+
+fn ok(text: Str) -> jpquery.JpQuery [io]
+    match jpquery.parse(text)
+        Ok(q)  => q
+        Err(_) =>
+            test.assert(false)
+            JpQuery { absolute: true, segments: [] }
+
+// A query rendered and parsed again, rendered.
+fn again(text: Str) -> Str [io]
+    jpquery.render(ok(jpquery.render(ok(text))))
+
+// The kind `check_types` answers for a query of one filter, or `None`.
+fn check_filter(e: jpquery.JpExpr) -> ?jperror.JpFaultKind
+    let q = JpQuery { absolute: true, segments: [JpChildSeg([JpFilterSel(e)])] }
+    match jpquery.check_types(q)
+        Some(f) => Some(f.kind)
+        None    => None
+
+fn rel(segs: [jpquery.JpSegment]) -> jpquery.JpQuery
+    JpQuery { absolute: false, segments: segs }
+
+fn call(f: jpquery.JpFunction, args: [jpquery.JpArgument]) -> jpquery.JpCall
+    JpCall { function: f, arguments: args }
+
+@test
+fn test_render_writes_every_construct() [io]
+    test.case("names, indices, wildcards, slices and a descendant segment")
+    test.assert(jpquery.render(ok("$.a[0,-1,*,'b']..c")) == "$['a'][0,-1,*,'b']..['c']")
+    test.assert(jpquery.render(ok("$[1:2:3][:2][1:][::-1][:]")) == "$[1:2:3][:2][1:][::-1][:]")
+
+    test.case("a filter's operators, with parentheses only where they are needed")
+    test.assert(jpquery.render(ok("$[?@.a || @.b && @.c]")) == "$[?@['a'] || @['b'] && @['c']]")
+    test.assert(jpquery.render(ok("$[?(@.a || @.b) && @.c]")) == "$[?(@['a'] || @['b']) && @['c']]")
+    test.assert(jpquery.render(ok("$[?!(@.a && @.b)]")) == "$[?!(@['a'] && @['b'])]")
+    test.assert(jpquery.render(ok("$[?!@.a]")) == "$[?!@['a']]")
+    test.assert(jpquery.render(ok("$[?!match(@.a, 'x')]")) == "$[?!match(@['a'], 'x')]")
+
+    test.case("every comparison and every literal")
+    test.assert(jpquery.render(ok("$[?@.a==1 && @.b!=1.5 && @.c<true && @.d<=false && @.e>null && @.f>=\"q\"]"))
+                == "$[?@['a'] == 1 && @['b'] != 1.5 && @['c'] < true && @['d'] <= false && @['e'] > null && @['f'] >= 'q']")
+
+    test.case("calls, with each kind of argument")
+    test.assert(jpquery.render(ok("$[?length(value(@.*)) == count($..x) && search(@.s, 'a\\\\.b')]"))
+                == "$[?length(value(@[*])) == count($..['x']) && search(@['s'], 'a\\\\.b')]")
+
+    test.case("a string with a quote, a backslash and control characters, escaped as a normalized path writes it")
+    test.assert(jpquery.quote("a'b\\c\u{8}\t\n\u{c}\r\u{1}") == "'a\\'b\\\\c\\b\\t\\n\\f\\r\\u0001'")
+
+    test.case("a rendering parses back to the same rendering")
+    test.assert(again("$..book[?@.price < 10 || @.isbn][0:2]") == jpquery.render(ok("$..book[?@.price < 10 || @.isbn][0:2]")))
+
+@test
+fn test_a_query_built_in_code_is_checked() [io]
+    let a = rel([JpChildSeg([JpNameSel("a")])])
+    let many = rel([JpChildSeg([JpWildcardSel])])
+
+    test.case("a well-typed filter passes")
+    test.assert(check_filter(JpExprCompare(JpOperandQuery(a), JpOpEq, JpOperandLiteral(JpLitInt(1)))) == None)
+    test.assert(check_filter(JpExprAnd(JpExprTest(a), JpExprNot(JpExprOr(JpExprTest(many), JpExprTest(a))))) == None)
+
+    test.case("a non-singular operand, and a logical call as an operand")
+    test.assert(check_filter(JpExprCompare(JpOperandQuery(many), JpOpEq, JpOperandLiteral(JpLitNull)))
+                == Some(JpNotSingular))
+    let m = call(JpFnMatch, [JpArgQuery(a), JpArgLiteral(JpLitStr("x"))])
+    test.assert(check_filter(JpExprCompare(JpOperandCall(m), JpOpEq, JpOperandLiteral(JpLitTrue)))
+                == Some(JpWrongArgumentType))
+    test.assert(check_filter(JpExprCompare(JpOperandLiteral(JpLitTrue), JpOpEq,
+                                           JpOperandCall(call(JpFnLength, [JpArgQuery(a)])))) == None)
+
+    test.case("a value call as a test, and a logical call as one")
+    test.assert(check_filter(JpExprCall(call(JpFnCount, [JpArgQuery(many)]))) == Some(JpWrongArgumentType))
+    test.assert(check_filter(JpExprCall(m)) == None)
+
+    test.case("the arity, and each argument against its parameter")
+    test.assert(check_filter(JpExprCall(call(JpFnMatch, [JpArgQuery(a)]))) == Some(JpWrongArity))
+    test.assert(check_filter(JpExprCall(call(JpFnSearch, [JpArgQuery(many), JpArgLiteral(JpLitStr("x"))])))
+                == Some(JpWrongArgumentType))
+    test.assert(check_filter(JpExprCall(call(JpFnSearch, [JpArgLogical(JpExprTest(a)), JpArgLiteral(JpLitStr("x"))])))
+                == Some(JpWrongArgumentType))
+    test.assert(check_filter(JpExprCall(call(JpFnSearch, [JpArgCall(m), JpArgLiteral(JpLitStr("x"))])))
+                == Some(JpWrongArgumentType))
+    let length_of_count = call(JpFnLength, [JpArgCall(call(JpFnCount, [JpArgQuery(many)]))])
+    test.assert(check_filter(JpExprCompare(JpOperandCall(length_of_count), JpOpGt, JpOperandLiteral(JpLitInt(0)))) == None)
+    test.assert(check_filter(JpExprCall(call(JpFnSearch, [JpArgCall(call(JpFnMatch, [JpArgQuery(a)])),
+                                                         JpArgLiteral(JpLitStr("x"))]))) == Some(JpWrongArgumentType))
+    let count_of_literal = call(JpFnCount, [JpArgLiteral(JpLitInt(1))])
+    test.assert(check_filter(JpExprCompare(JpOperandCall(count_of_literal), JpOpEq, JpOperandLiteral(JpLitInt(1))))
+                == Some(JpWrongArgumentType))
+    let count_of_call = call(JpFnCount, [JpArgCall(call(JpFnLength, [JpArgQuery(a)]))])
+    test.assert(check_filter(JpExprCompare(JpOperandCall(count_of_call), JpOpEq, JpOperandLiteral(JpLitInt(1))))
+                == Some(JpWrongArgumentType))
+
+    test.case("a fault inside an argument is found")
+    let bad_inner = call(JpFnLength, [JpArgCall(call(JpFnLength, [JpArgQuery(many)]))])
+    test.assert(check_filter(JpExprCompare(JpOperandCall(bad_inner), JpOpEq, JpOperandLiteral(JpLitInt(1))))
+                == Some(JpWrongArgumentType))
+    let deep = rel([JpChildSeg([JpIndexSel(jpquery.MAX_INDEX + 1)])])
+    test.assert(check_filter(JpExprTest(deep)) == Some(JpBadIndex))
+    test.assert(check_filter(JpExprCompare(JpOperandQuery(deep), JpOpEq, JpOperandLiteral(JpLitInt(1))))
+                == Some(JpBadIndex))
+    let logical_arg = call(JpFnCount, [JpArgLogical(JpExprTest(deep))])
+    test.assert(check_filter(JpExprCompare(JpOperandCall(logical_arg), JpOpEq, JpOperandLiteral(JpLitInt(1))))
+                == Some(JpWrongArgumentType))
+
+    test.case("an index or a slice bound outside MAX_INDEX")
+    let big = jpquery.MAX_INDEX + 1
+    let slice = JpSlice { start: Some(big), end: None, step: None }
+    let q = JpQuery { absolute: true, segments: [JpDescendantSeg([JpSliceSel(slice)])] }
+    match jpquery.check_types(q)
+        Some(f) =>
+            test.assert(f.kind == JpBadIndex)
+            test.assert(f.at == 0)
+        None    => test.assert(false)
+    let slice2 = JpSlice { start: None, end: Some(big), step: None }
+    test.assert(jpquery.check_types(JpQuery { absolute: true, segments: [JpChildSeg([JpSliceSel(slice2)])] }) != None)
+    let slice3 = JpSlice { start: None, end: None, step: Some(big) }
+    test.assert(jpquery.check_types(JpQuery { absolute: true, segments: [JpChildSeg([JpSliceSel(slice3)])] }) != None)
+    let fine = JpSlice { start: Some(1), end: Some(2), step: Some(1) }
+    test.assert(jpquery.check_types(JpQuery { absolute: true, segments: [JpChildSeg([JpSliceSel(fine), JpWildcardSel])] }) == None)

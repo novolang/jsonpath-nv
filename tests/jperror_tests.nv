@@ -1,0 +1,32 @@
+// jperror_tests.nv — the fault kinds, their names and the message.
+
+use std.test
+use std.str
+use jperror
+
+@test
+fn test_every_kind_has_a_stable_name() [io]
+    let kinds = [JpNoRoot, JpBadSelector, JpBadName, JpBadIndex, JpBadFilter,
+                 JpUnknownFunction, JpWrongArity, JpWrongArgumentType, JpNotSingular,
+                 JpTrailingInput, JpUnexpectedEnd, JpBadEscape, JpBadRegex, JpNoCategoryLookup]
+    let names = ["no-root", "bad-selector", "bad-name", "bad-index", "bad-filter",
+                 "unknown-function", "wrong-arity", "wrong-argument-type", "not-singular",
+                 "trailing-input", "unexpected-end", "bad-escape", "bad-regex",
+                 "no-category-lookup"]
+    test.case("each kind's name, lower case with hyphens")
+    var i = 0
+    for k in kinds
+        test.assert(jperror.kind_name(k) == names[i])
+        i = i + 1
+
+@test
+fn test_a_message_names_the_kind_and_the_range() [io]
+    let f = jperror.fault(JpUnknownFunction, 3, 9)
+
+    test.case("the message holds the kind's name and the byte range")
+    test.assert(jperror.message(f) == "unknown-function at bytes 3 to 9 of the query")
+
+    test.case("and the Error implementation answers the same")
+    let errs = [f]
+    for e in errs
+        test.assert(e.message() == jperror.message(f))

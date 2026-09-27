@@ -1,0 +1,2208 @@
+// cts_tests.nv — the JSONPath Compliance Test Suite.
+//
+// Written by tools/cts.py from
+// https://github.com/jsonpath-standard/jsonpath-compliance-test-suite at
+// commit 9d1a415, BSD-2-Clause.  702 of its 706 cases; the tool lists the
+// others with their reasons.
+
+use std.test
+use std.json
+use std.list
+use std.str
+use jpquery
+use jpeval
+
+// The general categories of the code points the category cases use,
+// from Python's unicodedata.
+fn category(cp: Int) -> Str
+    if cp == 32
+        return "Zs"
+    if cp == 34
+        return "Po"
+    if cp == 44
+        return "Po"
+    if cp == 49
+        return "Nd"
+    if cp == 91
+        return "Ps"
+    if cp == 93
+        return "Pe"
+    if cp == 101
+        return "Ll"
+    if cp == 114
+        return "Ll"
+    if cp == 116
+        return "Ll"
+    if cp == 117
+        return "Ll"
+    if cp == 123
+        return "Ps"
+    if cp == 125
+        return "Pe"
+    if cp == 1046
+        return "Lu"
+    if cp == 1078
+        return "Ll"
+    "Cn"
+
+// Whether a query is refused.
+fn refused(query: Str) -> Bool
+    match jpquery.parse(query)
+        Ok(_)  => false
+        Err(_) => true
+
+// Whether a query selects, from a document, one of the accepted
+// nodelists: `values` a JSON array of the values, and `paths` the
+// normalized paths joined with a line feed.
+fn selects(query: Str, doc: Str, values: [Str], paths: [Str]) -> Bool
+    let q = match jpquery.parse(query)
+        Ok(x)  => x
+        Err(_) =>
+            return false
+    let d = json.parse(doc) ?? json.parse("null")!
+    let sel = jpeval.select_categorised(q, d, jpeval.default_limits(), category)
+    var got: [Str] = []
+    for n in sel.nodes
+        list.push(got, n.path)
+    let text = str.join(got, "\n")
+    var i = 0
+    for want in paths
+        if want == text and same_values(sel.nodes, values[i])
+            return true
+        i = i + 1
+    false
+
+// Whether the nodes' values are the elements of a JSON array.
+fn same_values(nodes: [jpeval.JpNode], values: Str) -> Bool
+    let want = json.parse(values) ?? json.parse("[]")!
+    if (json.len(want) ?? 0) != list.len(nodes)
+        return false
+    var i = 0
+    for n in nodes
+        let v = json.index(want, i) ?? json.parse("null")!
+        if not json.equals(n.value, v)
+            return false
+        i = i + 1
+    true
+
+@test
+fn test_cts_000() [io]
+    test.case("basic, root")
+    test.assert(selects("\$", "[\"first\",\"second\"]", ["[[\"first\",\"second\"]]"], ["\$"]))
+    test.case("basic, no leading whitespace")
+    test.assert(refused(" \$"))
+    test.case("basic, no trailing whitespace")
+    test.assert(refused("\$ "))
+    test.case("basic, name shorthand")
+    test.assert(selects("\$.a", "{\"a\":\"A\",\"b\":\"B\"}", ["[\"A\"]"], ["\$['a']"]))
+    test.case("basic, name shorthand, extended unicode ☺")
+    test.assert(selects("\$.☺", "{\"☺\":\"A\",\"b\":\"B\"}", ["[\"A\"]"], ["\$['☺']"]))
+    test.case("basic, name shorthand, underscore")
+    test.assert(selects("\$._", "{\"_\":\"A\",\"_foo\":\"B\"}", ["[\"A\"]"], ["\$['_']"]))
+    test.case("basic, name shorthand, symbol")
+    test.assert(refused("\$.&"))
+    test.case("basic, name shorthand, number")
+    test.assert(refused("\$.1"))
+    test.case("basic, name shorthand, absent data")
+    test.assert(selects("\$.c", "{\"a\":\"A\",\"b\":\"B\"}", ["[]"], [""]))
+    test.case("basic, name shorthand, array data")
+    test.assert(selects("\$.a", "[\"first\",\"second\"]", ["[]"], [""]))
+    test.case("basic, name shorthand, object data, nested")
+    test.assert(selects("\$.a.b.c", "{\"a\":{\"b\":{\"c\":\"C\"}}}", ["[\"C\"]"], ["\$['a']['b']['c']"]))
+    test.case("basic, wildcard shorthand, object data")
+    test.assert(selects("\$.*",
+        "{\"a\":\"A\",\"b\":\"B\"}",
+        ["[\"A\",\"B\"]", "[\"B\",\"A\"]"],
+        ["\$['a']\n\$['b']", "\$['b']\n\$['a']"]))
+    test.case("basic, wildcard shorthand, array data")
+    test.assert(selects("\$.*", "[\"first\",\"second\"]", ["[\"first\",\"second\"]"], ["\$[0]\n\$[1]"]))
+    test.case("basic, wildcard selector, array data")
+    test.assert(selects("\$[*]", "[\"first\",\"second\"]", ["[\"first\",\"second\"]"], ["\$[0]\n\$[1]"]))
+    test.case("basic, wildcard shorthand, then name shorthand")
+    test.assert(selects("\$.*.a",
+        "{\"x\":{\"a\":\"Ax\",\"b\":\"Bx\"},\"y\":{\"a\":\"Ay\",\"b\":\"By\"}}",
+        ["[\"Ax\",\"Ay\"]", "[\"Ay\",\"Ax\"]"],
+        ["\$['x']['a']\n\$['y']['a']", "\$['y']['a']\n\$['x']['a']"]))
+    test.case("basic, multiple selectors")
+    test.assert(selects("\$[0,2]", "[0,1,2,3,4,5,6,7,8,9]", ["[0,2]"], ["\$[0]\n\$[2]"]))
+    test.case("basic, multiple selectors, space instead of comma")
+    test.assert(refused("\$[0 2]"))
+    test.case("basic, selector, leading comma")
+    test.assert(refused("\$[,0]"))
+    test.case("basic, selector, trailing comma")
+    test.assert(refused("\$[0,]"))
+    test.case("basic, multiple selectors, name and index, array data")
+    test.assert(selects("\$['a',1]", "[0,1,2,3,4,5,6,7,8,9]", ["[1]"], ["\$[1]"]))
+    test.case("basic, multiple selectors, name and index, object data")
+    test.assert(selects("\$['a',1]", "{\"a\":1,\"b\":2}", ["[1]"], ["\$['a']"]))
+    test.case("basic, multiple selectors, index and slice")
+    test.assert(selects("\$[1,5:7]", "[0,1,2,3,4,5,6,7,8,9]", ["[1,5,6]"], ["\$[1]\n\$[5]\n\$[6]"]))
+    test.case("basic, multiple selectors, index and slice, overlapping")
+    test.assert(selects("\$[1,0:3]", "[0,1,2,3,4,5,6,7,8,9]", ["[1,0,1,2]"], ["\$[1]\n\$[0]\n\$[1]\n\$[2]"]))
+    test.case("basic, multiple selectors, duplicate index")
+    test.assert(selects("\$[1,1]", "[0,1,2,3,4,5,6,7,8,9]", ["[1,1]"], ["\$[1]\n\$[1]"]))
+    test.case("basic, multiple selectors, wildcard and index")
+    test.assert(selects("\$[*,1]",
+        "[0,1,2,3,4,5,6,7,8,9]",
+        ["[0,1,2,3,4,5,6,7,8,9,1]"],
+        ["\$[0]\n\$[1]\n\$[2]\n\$[3]\n\$[4]\n\$[5]\n\$[6]\n\$[7]\n\$[8]\n\$[9]\n\$[1]"]))
+    test.case("basic, multiple selectors, wildcard and name")
+    test.assert(selects("\$[*,'a']",
+        "{\"a\":\"A\",\"b\":\"B\"}",
+        ["[\"A\",\"B\",\"A\"]", "[\"B\",\"A\",\"A\"]"],
+        ["\$['a']\n\$['b']\n\$['a']", "\$['b']\n\$['a']\n\$['a']"]))
+    test.case("basic, multiple selectors, wildcard and slice")
+    test.assert(selects("\$[*,0:2]",
+        "[0,1,2,3,4,5,6,7,8,9]",
+        ["[0,1,2,3,4,5,6,7,8,9,0,1]"],
+        ["\$[0]\n\$[1]\n\$[2]\n\$[3]\n\$[4]\n\$[5]\n\$[6]\n\$[7]\n\$[8]\n\$[9]\n\$[0]\n\$[1]"]))
+    test.case("basic, multiple selectors, multiple wildcards")
+    test.assert(selects("\$[*,*]", "[0,1,2]", ["[0,1,2,0,1,2]"], ["\$[0]\n\$[1]\n\$[2]\n\$[0]\n\$[1]\n\$[2]"]))
+    test.case("basic, empty segment")
+    test.assert(refused("\$[]"))
+    test.case("basic, descendant segment, index")
+    test.assert(selects("\$..[1]", "{\"o\":[0,1,[2,3]]}", ["[1,3]"], ["\$['o'][1]\n\$['o'][2][1]"]))
+    test.case("basic, descendant segment, name shorthand")
+    test.assert(selects("\$..a",
+        "{\"o\":[{\"a\":\"b\"},{\"a\":\"c\"}]}",
+        ["[\"b\",\"c\"]"],
+        ["\$['o'][0]['a']\n\$['o'][1]['a']"]))
+    test.case("basic, name shorthand, true")
+    test.assert(selects("\$.true", "{\"true\":\"A\",\"_foo\":\"B\"}", ["[\"A\"]"], ["\$['true']"]))
+    test.case("basic, name shorthand, false")
+    test.assert(selects("\$.false", "{\"false\":\"A\",\"_foo\":\"B\"}", ["[\"A\"]"], ["\$['false']"]))
+    test.case("basic, name shorthand, null")
+    test.assert(selects("\$.null", "{\"null\":\"A\",\"_foo\":\"B\"}", ["[\"A\"]"], ["\$['null']"]))
+    test.case("basic, descendant segment, wildcard shorthand, array data")
+    test.assert(selects("\$..*", "[0,1]", ["[0,1]"], ["\$[0]\n\$[1]"]))
+    test.case("basic, descendant segment, wildcard selector, array data")
+    test.assert(selects("\$..[*]", "[0,1]", ["[0,1]"], ["\$[0]\n\$[1]"]))
+    test.case("basic, descendant segment, wildcard selector, nested arrays")
+    test.assert(selects("\$..[*]", "[[[1]],[2]]", ["[[[1]],[2],[1],1,2]", "[[[1]],[2],[1],2,1]"], ["\$[0]\n\$[1]\n\$[0][0]\n\$[0][0][0]\n\$[1][0]",
+        "\$[0]\n\$[1]\n\$[0][0]\n\$[1][0]\n\$[0][0][0]"]))
+    test.case("basic, descendant segment, wildcard selector, nested objects")
+    test.assert(selects("\$..[*]", "{\"a\":{\"c\":{\"e\":1}},\"b\":{\"d\":2}}", ["[{\"c\":{\"e\":1}},{\"d\":2},{\"e\":1},1,2]",
+        "[{\"c\":{\"e\":1}},{\"d\":2},{\"e\":1},2,1]",
+        "[{\"c\":{\"e\":1}},{\"d\":2},2,{\"e\":1},1]",
+        "[{\"d\":2},{\"c\":{\"e\":1}},{\"e\":1},1,2]",
+        "[{\"d\":2},{\"c\":{\"e\":1}},{\"e\":1},2,1]",
+        "[{\"d\":2},{\"c\":{\"e\":1}},2,{\"e\":1},1]"],
+    ["\$['a']\n\$['b']\n\$['a']['c']\n\$['a']['c']['e']\n\$['b']['d']",
+        "\$['a']\n\$['b']\n\$['a']['c']\n\$['b']['d']\n\$['a']['c']['e']",
+        "\$['a']\n\$['b']\n\$['b']['d']\n\$['a']['c']\n\$['a']['c']['e']",
+        "\$['b']\n\$['a']\n\$['a']['c']\n\$['a']['c']['e']\n\$['b']['d']",
+        "\$['b']\n\$['a']\n\$['a']['c']\n\$['b']['d']\n\$['a']['c']['e']",
+        "\$['b']\n\$['a']\n\$['b']['d']\n\$['a']['c']\n\$['a']['c']['e']"]))
+    test.case("basic, descendant segment, wildcard shorthand, object data")
+    test.assert(selects("\$..*", "{\"a\":\"b\"}", ["[\"b\"]"], ["\$['a']"]))
+    test.case("basic, descendant segment, wildcard shorthand, nested data")
+    test.assert(selects("\$..*",
+        "{\"o\":[{\"a\":\"b\"}]}",
+        ["[[{\"a\":\"b\"}],{\"a\":\"b\"},\"b\"]"],
+        ["\$['o']\n\$['o'][0]\n\$['o'][0]['a']"]))
+
+@test
+fn test_cts_001() [io]
+    test.case("basic, descendant segment, multiple selectors")
+    test.assert(selects("\$..['a','d']",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[\"b\",\"e\",\"c\",\"f\"]"],
+        ["\$[0]['a']\n\$[0]['d']\n\$[1]['a']\n\$[1]['d']"]))
+    test.case("basic, descendant segment, object traversal, multiple selectors")
+    test.assert(selects("\$..['a','d']", "{\"x\":{\"a\":\"b\",\"d\":\"e\"},\"y\":{\"a\":\"c\",\"d\":\"f\"}}", ["[\"b\",\"e\",\"c\",\"f\"]", "[\"c\",\"f\",\"b\",\"e\"]"], ["\$['x']['a']\n\$['x']['d']\n\$['y']['a']\n\$['y']['d']",
+        "\$['y']['a']\n\$['y']['d']\n\$['x']['a']\n\$['x']['d']"]))
+    test.case("basic, bald descendant segment")
+    test.assert(refused("\$.."))
+    test.case("basic, current node identifier without filter selector")
+    test.assert(refused("\$[@.a]"))
+    test.case("basic, root node identifier in brackets without filter selector")
+    test.assert(refused("\$[\$.a]"))
+    test.case("filter, existence, without segments")
+    test.assert(selects("\$[?@]",
+        "{\"a\":1,\"b\":null}",
+        ["[1,null]", "[null,1]"],
+        ["\$['a']\n\$['b']", "\$['b']\n\$['a']"]))
+    test.case("filter, existence")
+    test.assert(selects("\$[?@.a]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, existence, present with null")
+    test.assert(selects("\$[?@.a]",
+        "[{\"a\":null,\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":null,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, absolute existence, without segments")
+    test.assert(selects("\$[?\$]",
+        "{\"a\":1,\"b\":null}",
+        ["[1,null]", "[null,1]"],
+        ["\$['a']\n\$['b']", "\$['b']\n\$['a']"]))
+    test.case("filter, absolute existence, with segments")
+    test.assert(selects("\$[?\$.*.a]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("filter, equals string, single quotes")
+    test.assert(selects("\$[?@.a=='b']",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals numeric string, single quotes")
+    test.assert(selects("\$[?@.a=='1']",
+        "[{\"a\":\"1\",\"d\":\"e\"},{\"a\":1,\"d\":\"f\"}]",
+        ["[{\"a\":\"1\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals string, double quotes")
+    test.assert(selects("\$[?@.a==\"b\"]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals numeric string, double quotes")
+    test.assert(selects("\$[?@.a==\"1\"]",
+        "[{\"a\":\"1\",\"d\":\"e\"},{\"a\":1,\"d\":\"f\"}]",
+        ["[{\"a\":\"1\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number")
+    test.assert(selects("\$[?@.a==1]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"},{\"a\":2,\"d\":\"f\"},{\"a\":\"1\",\"d\":\"f\"}]",
+        ["[{\"a\":1,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals null")
+    test.assert(selects("\$[?@.a==null]",
+        "[{\"a\":null,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":null,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals null, absent from data")
+    test.assert(selects("\$[?@.a==null]", "[{\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]", ["[]"], [""]))
+    test.case("filter, equals true")
+    test.assert(selects("\$[?@.a==true]",
+        "[{\"a\":true,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":true,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals false")
+    test.assert(selects("\$[?@.a==false]",
+        "[{\"a\":false,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":false,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals self")
+    test.assert(selects("\$[?@==@]",
+        "[1,null,true,{\"a\":\"b\"},[false]]",
+        ["[1,null,true,{\"a\":\"b\"},[false]]"],
+        ["\$[0]\n\$[1]\n\$[2]\n\$[3]\n\$[4]"]))
+    test.case("filter, absolute, equals self")
+    test.assert(selects("\$[?\$==\$]",
+        "[1,null,true,{\"a\":\"b\"},[false]]",
+        ["[1,null,true,{\"a\":\"b\"},[false]]"],
+        ["\$[0]\n\$[1]\n\$[2]\n\$[3]\n\$[4]"]))
+    test.case("filter, equals, absent from index selector equals absent from name selector")
+    test.assert(selects("\$[?@.absent==@.list[9]]", "[{\"list\":[1]}]", ["[{\"list\":[1]}]"], ["\$[0]"]))
+    test.case("filter, deep equality, arrays")
+    test.assert(selects("\$[?@.a==@.b]",
+        "[{\"a\":false,\"b\":[1,2]},{\"a\":[[1,[2]]],\"b\":[[1,[2]]]},{\"a\":[[1,[2]]],\"b\":[[[2],1]]},{\"a\":[[1,[2]]],\"b\":[[1,2]]}]",
+        ["[{\"a\":[[1,[2]]],\"b\":[[1,[2]]]}]"],
+        ["\$[1]"]))
+    test.case("filter, deep equality, objects")
+    test.assert(selects("\$[?@.a==@.b]",
+        "[{\"a\":false,\"b\":{\"x\":1,\"y\":{\"z\":1}}},{\"a\":{\"x\":1,\"y\":{\"z\":1}},\"b\":{\"x\":1,\"y\":{\"z\":1}}},{\"a\":{\"x\":1,\"y\":{\"z\":1}},\"b\":{\"y\":{\"z\":1},\"x\":1}},{\"a\":{\"x\":1,\"y\":{\"z\":1}},\"b\":{\"x\":1}},{\"a\":{\"x\":1,\"y\":{\"z\":1}},\"b\":{\"x\":1,\"y\":{\"z\":2}}}]",
+        ["[{\"a\":{\"x\":1,\"y\":{\"z\":1}},\"b\":{\"x\":1,\"y\":{\"z\":1}}},{\"a\":{\"x\":1,\"y\":{\"z\":1}},\"b\":{\"y\":{\"z\":1},\"x\":1}}]"],
+        ["\$[1]\n\$[2]"]))
+    test.case("filter, not-equals string, single quotes")
+    test.assert(selects("\$[?@.a!='b']",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"c\",\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, not-equals numeric string, single quotes")
+    test.assert(selects("\$[?@.a!='1']",
+        "[{\"a\":\"1\",\"d\":\"e\"},{\"a\":1,\"d\":\"f\"}]",
+        ["[{\"a\":1,\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, not-equals string, single quotes, different type")
+    test.assert(selects("\$[?@.a!='b']",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":1,\"d\":\"f\"}]",
+        ["[{\"a\":1,\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, not-equals string, double quotes")
+    test.assert(selects("\$[?@.a!=\"b\"]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"c\",\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, not-equals numeric string, double quotes")
+    test.assert(selects("\$[?@.a!=\"1\"]",
+        "[{\"a\":\"1\",\"d\":\"e\"},{\"a\":1,\"d\":\"f\"}]",
+        ["[{\"a\":1,\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, not-equals string, double quotes, different types")
+    test.assert(selects("\$[?@.a!=\"b\"]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":1,\"d\":\"f\"}]",
+        ["[{\"a\":1,\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, not-equals number")
+    test.assert(selects("\$[?@.a!=1]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":2,\"d\":\"f\"},{\"a\":\"1\",\"d\":\"f\"}]",
+        ["[{\"a\":2,\"d\":\"f\"},{\"a\":\"1\",\"d\":\"f\"}]"],
+        ["\$[1]\n\$[2]"]))
+    test.case("filter, not-equals number, different types")
+    test.assert(selects("\$[?@.a!=1]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"c\",\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, not-equals null")
+    test.assert(selects("\$[?@.a!=null]",
+        "[{\"a\":null,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"c\",\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, not-equals null, absent from data")
+    test.assert(selects("\$[?@.a!=null]",
+        "[{\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("filter, not-equals true")
+    test.assert(selects("\$[?@.a!=true]",
+        "[{\"a\":true,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"c\",\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, not-equals false")
+    test.assert(selects("\$[?@.a!=false]",
+        "[{\"a\":false,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"c\",\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, less than string, single quotes")
+    test.assert(selects("\$[?@.a<'c']",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, less than string, double quotes")
+    test.assert(selects("\$[?@.a<\"c\"]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, less than number")
+    test.assert(selects("\$[?@.a<10]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":10,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"},{\"a\":20,\"d\":\"f\"}]",
+        ["[{\"a\":1,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, less than null")
+    test.assert(selects("\$[?@.a<null]", "[{\"a\":null,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]", ["[]"], [""]))
+
+@test
+fn test_cts_002() [io]
+    test.case("filter, less than true")
+    test.assert(selects("\$[?@.a<true]", "[{\"a\":true,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]", ["[]"], [""]))
+    test.case("filter, less than false")
+    test.assert(selects("\$[?@.a<false]", "[{\"a\":false,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]", ["[]"], [""]))
+    test.case("filter, less than or equal to string, single quotes")
+    test.assert(selects("\$[?@.a<='c']",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("filter, less than or equal to string, double quotes")
+    test.assert(selects("\$[?@.a<=\"c\"]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("filter, less than or equal to number")
+    test.assert(selects("\$[?@.a<=10]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":10,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"},{\"a\":20,\"d\":\"f\"}]",
+        ["[{\"a\":1,\"d\":\"e\"},{\"a\":10,\"d\":\"e\"}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("filter, less than or equal to null")
+    test.assert(selects("\$[?@.a<=null]",
+        "[{\"a\":null,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":null,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, less than or equal to true")
+    test.assert(selects("\$[?@.a<=true]",
+        "[{\"a\":true,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":true,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, less than or equal to false")
+    test.assert(selects("\$[?@.a<=false]",
+        "[{\"a\":false,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":false,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, greater than string, single quotes")
+    test.assert(selects("\$[?@.a>'c']",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"a\":\"d\",\"d\":\"f\"}]"],
+        ["\$[2]"]))
+    test.case("filter, greater than string, double quotes")
+    test.assert(selects("\$[?@.a>\"c\"]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"a\":\"d\",\"d\":\"f\"}]"],
+        ["\$[2]"]))
+    test.case("filter, greater than number")
+    test.assert(selects("\$[?@.a>10]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":10,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"},{\"a\":20,\"d\":\"f\"}]",
+        ["[{\"a\":20,\"d\":\"f\"}]"],
+        ["\$[3]"]))
+    test.case("filter, greater than null")
+    test.assert(selects("\$[?@.a>null]", "[{\"a\":null,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]", ["[]"], [""]))
+    test.case("filter, greater than true")
+    test.assert(selects("\$[?@.a>true]", "[{\"a\":true,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]", ["[]"], [""]))
+    test.case("filter, greater than false")
+    test.assert(selects("\$[?@.a>false]", "[{\"a\":false,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]", ["[]"], [""]))
+    test.case("filter, greater than or equal to string, single quotes")
+    test.assert(selects("\$[?@.a>='c']",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"a\":\"c\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]"],
+        ["\$[1]\n\$[2]"]))
+    test.case("filter, greater than or equal to string, double quotes")
+    test.assert(selects("\$[?@.a>=\"c\"]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"a\":\"c\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]"],
+        ["\$[1]\n\$[2]"]))
+    test.case("filter, greater than or equal to number")
+    test.assert(selects("\$[?@.a>=10]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":10,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"},{\"a\":20,\"d\":\"f\"}]",
+        ["[{\"a\":10,\"d\":\"e\"},{\"a\":20,\"d\":\"f\"}]"],
+        ["\$[1]\n\$[3]"]))
+    test.case("filter, greater than or equal to null")
+    test.assert(selects("\$[?@.a>=null]",
+        "[{\"a\":null,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":null,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, greater than or equal to true")
+    test.assert(selects("\$[?@.a>=true]",
+        "[{\"a\":true,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":true,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, greater than or equal to false")
+    test.assert(selects("\$[?@.a>=false]",
+        "[{\"a\":false,\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":false,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, exists and not-equals null, absent from data")
+    test.assert(selects("\$[?@.a&&@.a!=null]",
+        "[{\"d\":\"e\"},{\"a\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"c\",\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, exists and exists, data false")
+    test.assert(selects("\$[?@.a&&@.b]",
+        "[{\"a\":false,\"b\":false},{\"b\":false},{\"c\":false}]",
+        ["[{\"a\":false,\"b\":false}]"],
+        ["\$[0]"]))
+    test.case("filter, exists or exists, data false")
+    test.assert(selects("\$[?@.a||@.b]",
+        "[{\"a\":false,\"b\":false},{\"b\":false},{\"c\":false}]",
+        ["[{\"a\":false,\"b\":false},{\"b\":false}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("filter, and")
+    test.assert(selects("\$[?@.a>0&&@.a<10]",
+        "[{\"a\":-10,\"d\":\"e\"},{\"a\":5,\"d\":\"f\"},{\"a\":20,\"d\":\"f\"}]",
+        ["[{\"a\":5,\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, or")
+    test.assert(selects("\$[?@.a=='b'||@.a=='d']",
+        "[{\"a\":\"a\",\"d\":\"e\"},{\"a\":\"b\",\"d\":\"f\"},{\"a\":\"c\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]"],
+        ["\$[1]\n\$[3]"]))
+    test.case("filter, not expression")
+    test.assert(selects("\$[?!(@.a=='b')]",
+        "[{\"a\":\"a\",\"d\":\"e\"},{\"a\":\"b\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"a\":\"a\",\"d\":\"e\"},{\"a\":\"d\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[2]"]))
+    test.case("filter, not exists")
+    test.assert(selects("\$[?!@.a]",
+        "[{\"a\":\"a\",\"d\":\"e\"},{\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, not exists, data null")
+    test.assert(selects("\$[?!@.a]",
+        "[{\"a\":null,\"d\":\"e\"},{\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("filter, non-singular existence, wildcard")
+    test.assert(selects("\$[?@.*]", "[1,[],[2],{},{\"a\":3}]", ["[[2],{\"a\":3}]"], ["\$[2]\n\$[4]"]))
+    test.case("filter, non-singular existence, multiple")
+    test.assert(selects("\$[?@[0, 0, 'a']]",
+        "[1,[],[2],[2,3],{\"a\":3},{\"b\":4},{\"a\":3,\"b\":4}]",
+        ["[[2],[2,3],{\"a\":3},{\"a\":3,\"b\":4}]"],
+        ["\$[2]\n\$[3]\n\$[4]\n\$[6]"]))
+    test.case("filter, non-singular existence, slice")
+    test.assert(selects("\$[?@[0:2]]", "[1,[],[2],[2,3,4],{},{\"a\":3}]", ["[[2],[2,3,4]]"], ["\$[2]\n\$[3]"]))
+    test.case("filter, non-singular existence, negated")
+    test.assert(selects("\$[?!@.*]", "[1,[],[2],{},{\"a\":3}]", ["[1,[],{}]"], ["\$[0]\n\$[1]\n\$[3]"]))
+    test.case("filter, non-singular query in comparison, slice")
+    test.assert(refused("\$[?@[0:0]==0]"))
+    test.case("filter, non-singular query in comparison, all children")
+    test.assert(refused("\$[?@[*]==0]"))
+    test.case("filter, non-singular query in comparison, descendants")
+    test.assert(refused("\$[?@..a==0]"))
+    test.case("filter, non-singular query in comparison, combined")
+    test.assert(refused("\$[?@.a[*].a==0]"))
+    test.case("filter, nested")
+    test.assert(selects("\$[?@[?@>1]]", "[[0],[0,1],[0,1,2],[42]]", ["[[0,1,2],[42]]"], ["\$[2]\n\$[3]"]))
+    test.case("filter, name segment on primitive, selects nothing")
+    test.assert(selects("\$[?@.a == 1]", "{\"a\":1}", ["[]"], [""]))
+    test.case("filter, name segment on array, selects nothing")
+    test.assert(selects("\$[?@['0'] == 5]", "[[5,6]]", ["[]"], [""]))
+    test.case("filter, index segment on object, selects nothing")
+    test.assert(selects("\$[?@[0] == 5]", "[{\"0\":5}]", ["[]"], [""]))
+
+@test
+fn test_cts_003() [io]
+    test.case("filter, followed by name selector")
+    test.assert(selects("\$[?@.a==1].b.x", "[{\"a\":1,\"b\":{\"x\":2}}]", ["[2]"], ["\$[0]['b']['x']"]))
+    test.case("filter, followed by child segment that selects multiple elements")
+    test.assert(selects("\$[?@.z=='_']['x','y']",
+        "[{\"x\":1,\"y\":null,\"z\":\"_\"}]",
+        ["[1,null]"],
+        ["\$[0]['x']\n\$[0]['y']"]))
+    test.case("filter, relative non-singular query, index, equal")
+    test.assert(refused("\$[?(@[0, 0]==42)]"))
+    test.case("filter, relative non-singular query, index, not equal")
+    test.assert(refused("\$[?(@[0, 0]!=42)]"))
+    test.case("filter, relative non-singular query, index, less-or-equal")
+    test.assert(refused("\$[?(@[0, 0]<=42)]"))
+    test.case("filter, relative non-singular query, name, equal")
+    test.assert(refused("\$[?(@['a', 'a']==42)]"))
+    test.case("filter, relative non-singular query, name, not equal")
+    test.assert(refused("\$[?(@['a', 'a']!=42)]"))
+    test.case("filter, relative non-singular query, name, less-or-equal")
+    test.assert(refused("\$[?(@['a', 'a']<=42)]"))
+    test.case("filter, relative non-singular query, combined, equal")
+    test.assert(refused("\$[?(@[0, '0']==42)]"))
+    test.case("filter, relative non-singular query, combined, not equal")
+    test.assert(refused("\$[?(@[0, '0']!=42)]"))
+    test.case("filter, relative non-singular query, combined, less-or-equal")
+    test.assert(refused("\$[?(@[0, '0']<=42)]"))
+    test.case("filter, relative non-singular query, wildcard, equal")
+    test.assert(refused("\$[?(@.*==42)]"))
+    test.case("filter, relative non-singular query, wildcard, not equal")
+    test.assert(refused("\$[?(@.*!=42)]"))
+    test.case("filter, relative non-singular query, wildcard, less-or-equal")
+    test.assert(refused("\$[?(@.*<=42)]"))
+    test.case("filter, relative non-singular query, slice, equal")
+    test.assert(refused("\$[?(@[0:0]==42)]"))
+    test.case("filter, relative non-singular query, slice, not equal")
+    test.assert(refused("\$[?(@[0:0]!=42)]"))
+    test.case("filter, relative non-singular query, slice, less-or-equal")
+    test.assert(refused("\$[?(@[0:0]<=42)]"))
+    test.case("filter, absolute non-singular query, index, equal")
+    test.assert(refused("\$[?(\$[0, 0]==42)]"))
+    test.case("filter, absolute non-singular query, index, not equal")
+    test.assert(refused("\$[?(\$[0, 0]!=42)]"))
+    test.case("filter, absolute non-singular query, index, less-or-equal")
+    test.assert(refused("\$[?(\$[0, 0]<=42)]"))
+    test.case("filter, absolute non-singular query, name, equal")
+    test.assert(refused("\$[?(\$['a', 'a']==42)]"))
+    test.case("filter, absolute non-singular query, name, not equal")
+    test.assert(refused("\$[?(\$['a', 'a']!=42)]"))
+    test.case("filter, absolute non-singular query, name, less-or-equal")
+    test.assert(refused("\$[?(\$['a', 'a']<=42)]"))
+    test.case("filter, absolute non-singular query, combined, equal")
+    test.assert(refused("\$[?(\$[0, '0']==42)]"))
+    test.case("filter, absolute non-singular query, combined, not equal")
+    test.assert(refused("\$[?(\$[0, '0']!=42)]"))
+    test.case("filter, absolute non-singular query, combined, less-or-equal")
+    test.assert(refused("\$[?(\$[0, '0']<=42)]"))
+    test.case("filter, absolute non-singular query, wildcard, equal")
+    test.assert(refused("\$[?(\$.*==42)]"))
+    test.case("filter, absolute non-singular query, wildcard, not equal")
+    test.assert(refused("\$[?(\$.*!=42)]"))
+    test.case("filter, absolute non-singular query, wildcard, less-or-equal")
+    test.assert(refused("\$[?(\$.*<=42)]"))
+    test.case("filter, absolute non-singular query, slice, equal")
+    test.assert(refused("\$[?(\$[0:0]==42)]"))
+    test.case("filter, absolute non-singular query, slice, not equal")
+    test.assert(refused("\$[?(\$[0:0]!=42)]"))
+    test.case("filter, absolute non-singular query, slice, less-or-equal")
+    test.assert(refused("\$[?(\$[0:0]<=42)]"))
+    test.case("filter, multiple selectors")
+    test.assert(selects("\$[?@.a,?@.b]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("filter, multiple selectors, comparison")
+    test.assert(selects("\$[?@.a=='b',?@.b=='x']",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, multiple selectors, overlapping")
+    test.assert(selects("\$[?@.a,?@.d]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[0]\n\$[1]"]))
+    test.case("filter, multiple selectors, filter and index")
+    test.assert(selects("\$[?@.a,1]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("filter, multiple selectors, filter and wildcard")
+    test.assert(selects("\$[?@.a,*]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"},{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[0]\n\$[1]"]))
+    test.case("filter, multiple selectors, filter and slice")
+    test.assert(selects("\$[?@.a,1:]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"},{\"g\":\"h\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"},{\"g\":\"h\"}]"],
+        ["\$[0]\n\$[1]\n\$[2]"]))
+    test.case("filter, multiple selectors, comparison filter, index and slice")
+    test.assert(selects("\$[1, ?@.a=='b', 1:]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"b\":\"c\",\"d\":\"f\"},{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]"],
+        ["\$[1]\n\$[0]\n\$[1]"]))
+    test.case("filter, equals number, zero and negative zero")
+    test.assert(selects("\$[?@.a==0]",
+        "[{\"a\":0,\"d\":\"e\"},{\"a\":0.1,\"d\":\"f\"},{\"a\":\"0\",\"d\":\"g\"}]",
+        ["[{\"a\":0,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+
+@test
+fn test_cts_004() [io]
+    test.case("filter, equals number, negative zero and zero")
+    test.assert(selects("\$[?@.a==-0]",
+        "[{\"a\":0,\"d\":\"e\"},{\"a\":0.1,\"d\":\"f\"},{\"a\":\"0\",\"d\":\"g\"}]",
+        ["[{\"a\":0,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, with and without decimal fraction")
+    test.assert(selects("\$[?@.a==1.0]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":2,\"d\":\"f\"},{\"a\":\"1\",\"d\":\"g\"}]",
+        ["[{\"a\":1,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, exponent")
+    test.assert(selects("\$[?@.a==1e2]",
+        "[{\"a\":100,\"d\":\"e\"},{\"a\":100.1,\"d\":\"f\"},{\"a\":\"100\",\"d\":\"g\"}]",
+        ["[{\"a\":100,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, exponent upper e")
+    test.assert(selects("\$[?@.a==1E2]",
+        "[{\"a\":100,\"d\":\"e\"},{\"a\":100.1,\"d\":\"f\"},{\"a\":\"100\",\"d\":\"g\"}]",
+        ["[{\"a\":100,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, positive exponent")
+    test.assert(selects("\$[?@.a==1e+2]",
+        "[{\"a\":100,\"d\":\"e\"},{\"a\":100.1,\"d\":\"f\"},{\"a\":\"100\",\"d\":\"g\"}]",
+        ["[{\"a\":100,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, negative exponent")
+    test.assert(selects("\$[?@.a==1e-2]",
+        "[{\"a\":0.01,\"d\":\"e\"},{\"a\":0.02,\"d\":\"f\"},{\"a\":\"0.01\",\"d\":\"g\"}]",
+        ["[{\"a\":0.01,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, exponent 0")
+    test.assert(selects("\$[?@.a==1e0]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":2,\"d\":\"f\"},{\"a\":\"1\",\"d\":\"g\"}]",
+        ["[{\"a\":1,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, exponent -0")
+    test.assert(selects("\$[?@.a==1e-0]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":2,\"d\":\"f\"},{\"a\":\"1\",\"d\":\"g\"}]",
+        ["[{\"a\":1,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, exponent +0")
+    test.assert(selects("\$[?@.a==1e+0]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":2,\"d\":\"f\"},{\"a\":\"1\",\"d\":\"g\"}]",
+        ["[{\"a\":1,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, exponent leading -0")
+    test.assert(selects("\$[?@.a==1e-02]",
+        "[{\"a\":0.01,\"d\":\"e\"},{\"a\":0.02,\"d\":\"f\"},{\"a\":\"0.01\",\"d\":\"g\"}]",
+        ["[{\"a\":0.01,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, exponent +00")
+    test.assert(selects("\$[?@.a==1e+00]",
+        "[{\"a\":1,\"d\":\"e\"},{\"a\":2,\"d\":\"f\"},{\"a\":\"1\",\"d\":\"g\"}]",
+        ["[{\"a\":1,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, decimal fraction")
+    test.assert(selects("\$[?@.a==1.1]",
+        "[{\"a\":1.1,\"d\":\"e\"},{\"a\":1,\"d\":\"f\"},{\"a\":\"1.1\",\"d\":\"g\"}]",
+        ["[{\"a\":1.1,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, decimal fraction, trailing 0")
+    test.assert(selects("\$[?@.a==1.10]",
+        "[{\"a\":1.1,\"d\":\"e\"},{\"a\":1,\"d\":\"f\"},{\"a\":\"1.1\",\"d\":\"g\"}]",
+        ["[{\"a\":1.1,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, decimal fraction, exponent")
+    test.assert(selects("\$[?@.a==1.1e2]",
+        "[{\"a\":110,\"d\":\"e\"},{\"a\":110.1,\"d\":\"f\"},{\"a\":\"110\",\"d\":\"g\"}]",
+        ["[{\"a\":110,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, decimal fraction, positive exponent")
+    test.assert(selects("\$[?@.a==1.1e+2]",
+        "[{\"a\":110,\"d\":\"e\"},{\"a\":110.1,\"d\":\"f\"},{\"a\":\"110\",\"d\":\"g\"}]",
+        ["[{\"a\":110,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, decimal fraction, negative exponent")
+    test.assert(selects("\$[?@.a==1.1e-2]",
+        "[{\"a\":0.011,\"d\":\"e\"},{\"a\":0.012,\"d\":\"f\"},{\"a\":\"0.011\",\"d\":\"g\"}]",
+        ["[{\"a\":0.011,\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("filter, equals number, invalid plus")
+    test.assert(refused("\$[?@.a==+1]"))
+    test.case("filter, equals number, invalid minus space")
+    test.assert(refused("\$[?@.a==- 1]"))
+    test.case("filter, equals number, invalid double minus")
+    test.assert(refused("\$[?@.a==--1]"))
+    test.case("filter, equals number, invalid no int digit")
+    test.assert(refused("\$[?@.a==.1]"))
+    test.case("filter, equals number, invalid minus no int digit")
+    test.assert(refused("\$[?@.a==-.1]"))
+    test.case("filter, equals number, invalid 00")
+    test.assert(refused("\$[?@.a==00]"))
+    test.case("filter, equals number, invalid leading 0")
+    test.assert(refused("\$[?@.a==01]"))
+    test.case("filter, equals number, invalid no fractional digit")
+    test.assert(refused("\$[?@.a==1.]"))
+    test.case("filter, equals number, invalid middle minus")
+    test.assert(refused("\$[?@.a==1.-1]"))
+    test.case("filter, equals number, invalid no fractional digit e")
+    test.assert(refused("\$[?@.a==1.e1]"))
+    test.case("filter, equals number, invalid no e digit")
+    test.assert(refused("\$[?@.a==1e]"))
+    test.case("filter, equals number, invalid no e digit minus")
+    test.assert(refused("\$[?@.a==1e-]"))
+    test.case("filter, equals number, invalid double e")
+    test.assert(refused("\$[?@.a==1eE1]"))
+    test.case("filter, equals number, invalid e digit double minus")
+    test.assert(refused("\$[?@.a==1e--1]"))
+    test.case("filter, equals number, invalid e digit plus minus")
+    test.assert(refused("\$[?@.a==1e+-1]"))
+    test.case("filter, equals number, invalid e decimal")
+    test.assert(refused("\$[?@.a==1e2.3]"))
+    test.case("filter, equals number, invalid multi e")
+    test.assert(refused("\$[?@.a==1e2e3]"))
+    test.case("filter, equals, special nothing")
+    test.assert(selects("\$.values[?length(@.a) == value(\$..c)]",
+        "{\"c\":\"cd\",\"values\":[{\"a\":\"ab\"},{\"c\":\"d\"},{\"a\":null}]}",
+        ["[{\"c\":\"d\"},{\"a\":null}]"],
+        ["\$['values'][1]\n\$['values'][2]"]))
+    test.case("filter, equals, empty node list and empty node list")
+    test.assert(selects("\$[?@.a == @.b]", "[{\"a\":1},{\"b\":2},{\"c\":3}]", ["[{\"c\":3}]"], ["\$[2]"]))
+    test.case("filter, equals, empty node list and special nothing")
+    test.assert(selects("\$[?@.a == length(@.b)]",
+        "[{\"a\":1},{\"b\":2},{\"c\":3}]",
+        ["[{\"b\":2},{\"c\":3}]"],
+        ["\$[1]\n\$[2]"]))
+    test.case("filter, object data")
+    test.assert(selects("\$[?@<3]",
+        "{\"a\":1,\"b\":2,\"c\":3}",
+        ["[1,2]", "[2,1]"],
+        ["\$['a']\n\$['b']", "\$['b']\n\$['a']"]))
+    test.case("filter, two consecutive ands")
+    test.assert(selects("\$[?@.a && @.b && @.c]",
+        "[{\"a\":1,\"b\":2},{\"a\":1,\"c\":3},{\"b\":2,\"c\":3},{\"a\":1,\"b\":2,\"c\":3}]",
+        ["[{\"a\":1,\"b\":2,\"c\":3}]"],
+        ["\$[3]"]))
+    test.case("filter, two consecutive ors")
+    test.assert(selects("\$[?@.a || @.b || @.c]",
+        "[{\"a\":1,\"b\":2},{\"a\":1,\"c\":3},{\"b\":2,\"c\":3},{\"a\":1,\"b\":2,\"c\":3}]",
+        ["[{\"a\":1,\"b\":2},{\"a\":1,\"c\":3},{\"b\":2,\"c\":3},{\"a\":1,\"b\":2,\"c\":3}]"],
+        ["\$[0]\n\$[1]\n\$[2]\n\$[3]"]))
+    test.case("filter, multiple consecutive ands")
+    test.assert(selects("\$[?@.a && @.b && @.c && @.d && @.e]",
+        "[{\"a\":1,\"b\":2,\"c\":3,\"d\":4},{\"b\":2,\"c\":3,\"d\":4,\"e\":5},{\"a\":1,\"c\":3,\"e\":5},{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5}]",
+        ["[{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5}]"],
+        ["\$[3]"]))
+
+@test
+fn test_cts_005() [io]
+    test.case("filter, multiple consecutive ors")
+    test.assert(selects("\$[?@.a || @.b || @.c || @.d || @.e]",
+        "[{\"a\":1,\"b\":2,\"c\":3,\"d\":4},{\"b\":2,\"c\":3,\"d\":4,\"e\":5},{\"a\":1,\"c\":3,\"e\":5},{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5}]",
+        ["[{\"a\":1,\"b\":2,\"c\":3,\"d\":4},{\"b\":2,\"c\":3,\"d\":4,\"e\":5},{\"a\":1,\"c\":3,\"e\":5},{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5}]"],
+        ["\$[0]\n\$[1]\n\$[2]\n\$[3]"]))
+    test.case("filter, multiple consecutive ors and ands")
+    test.assert(selects("\$[?@.a && @.b && @.c || @.d || @.e]",
+        "[{\"a\":1},{\"e\":5},{\"a\":1,\"b\":2},{\"d\":4,\"e\":5},{\"a\":1,\"b\":2,\"c\":3},{\"c\":3,\"d\":4,\"e\":5},{\"a\":1,\"c\":3,\"e\":5},{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5}]",
+        ["[{\"e\":5},{\"d\":4,\"e\":5},{\"a\":1,\"b\":2,\"c\":3},{\"c\":3,\"d\":4,\"e\":5},{\"a\":1,\"c\":3,\"e\":5},{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5}]"],
+        ["\$[1]\n\$[3]\n\$[4]\n\$[5]\n\$[6]\n\$[7]"]))
+    test.case("filter, and binds more tightly than or")
+    test.assert(selects("\$[?@.a || @.b && @.c]",
+        "[{\"a\":1},{\"b\":2,\"c\":3},{\"c\":3},{\"b\":2},{\"a\":1,\"b\":2,\"c\":3}]",
+        ["[{\"a\":1},{\"b\":2,\"c\":3},{\"a\":1,\"b\":2,\"c\":3}]"],
+        ["\$[0]\n\$[1]\n\$[4]"]))
+    test.case("filter, left to right evaluation")
+    test.assert(selects("\$[?@.a && @.b || @.c]",
+        "[{\"a\":1},{\"b\":2},{\"a\":1,\"b\":2},{\"a\":1,\"c\":3},{\"b\":1,\"c\":3},{\"c\":3},{\"a\":1,\"b\":2,\"c\":3}]",
+        ["[{\"a\":1,\"b\":2},{\"a\":1,\"c\":3},{\"b\":1,\"c\":3},{\"c\":3},{\"a\":1,\"b\":2,\"c\":3}]"],
+        ["\$[2]\n\$[3]\n\$[4]\n\$[5]\n\$[6]"]))
+    test.case("filter, group terms, left")
+    test.assert(selects("\$[?(@.a || @.b) && @.c]",
+        "[{\"a\":1,\"b\":2},{\"a\":1,\"c\":3},{\"b\":2,\"c\":3},{\"a\":1},{\"b\":2},{\"c\":3},{\"a\":1,\"b\":2,\"c\":3}]",
+        ["[{\"a\":1,\"c\":3},{\"b\":2,\"c\":3},{\"a\":1,\"b\":2,\"c\":3}]"],
+        ["\$[1]\n\$[2]\n\$[6]"]))
+    test.case("filter, group terms, right")
+    test.assert(selects("\$[?@.a && (@.b || @.c)]",
+        "[{\"a\":1},{\"a\":1,\"b\":2},{\"a\":1,\"c\":2},{\"b\":2},{\"c\":2},{\"a\":1,\"b\":2,\"c\":3}]",
+        ["[{\"a\":1,\"b\":2},{\"a\":1,\"c\":2},{\"a\":1,\"b\":2,\"c\":3}]"],
+        ["\$[1]\n\$[2]\n\$[5]"]))
+    test.case("filter, string literal, single quote in double quotes")
+    test.assert(selects("\$[?@ == \"quoted' literal\"]",
+        "[\"quoted' literal\",\"a\",\"quoted\\\\' literal\"]",
+        ["[\"quoted' literal\"]"],
+        ["\$[0]"]))
+    test.case("filter, string literal, double quote in single quotes")
+    test.assert(selects("\$[?@ == 'quoted\" literal']",
+        "[\"quoted\\\" literal\",\"a\",\"quoted\\\\\\\" literal\",\"'quoted\\\" literal'\"]",
+        ["[\"quoted\\\" literal\"]"],
+        ["\$[0]"]))
+    test.case("filter, string literal, escaped single quote in single quotes")
+    test.assert(selects("\$[?@ == 'quoted\\' literal']",
+        "[\"quoted' literal\",\"a\",\"quoted\\\\' literal\",\"'quoted\\\" literal'\"]",
+        ["[\"quoted' literal\"]"],
+        ["\$[0]"]))
+    test.case("filter, string literal, escaped double quote in double quotes")
+    test.assert(selects("\$[?@ == \"quoted\\\" literal\"]",
+        "[\"quoted\\\" literal\",\"a\",\"quoted\\\\\\\" literal\",\"'quoted\\\" literal'\"]",
+        ["[\"quoted\\\" literal\"]"],
+        ["\$[0]"]))
+    test.case("filter, literal true must be compared")
+    test.assert(refused("\$[?true]"))
+    test.case("filter, literal false must be compared")
+    test.assert(refused("\$[?false]"))
+    test.case("filter, literal string must be compared")
+    test.assert(refused("\$[?'abc']"))
+    test.case("filter, literal int must be compared")
+    test.assert(refused("\$[?2]"))
+    test.case("filter, literal float must be compared")
+    test.assert(refused("\$[?2.2]"))
+    test.case("filter, literal null must be compared")
+    test.assert(refused("\$[?null]"))
+    test.case("filter, and, literals must be compared")
+    test.assert(refused("\$[?true && false]"))
+    test.case("filter, or, literals must be compared")
+    test.assert(refused("\$[?true || false]"))
+    test.case("filter, and, right hand literal must be compared")
+    test.assert(refused("\$[?true == false && false]"))
+    test.case("filter, or, right hand literal must be compared")
+    test.assert(refused("\$[?true == false || false]"))
+    test.case("filter, and, left hand literal must be compared")
+    test.assert(refused("\$[?false && true == false]"))
+    test.case("filter, or, left hand literal must be compared")
+    test.assert(refused("\$[?false || true == false]"))
+    test.case("filter, true, incorrectly capitalized")
+    test.assert(refused("\$[?@==True]"))
+    test.case("filter, quoted True, double quotes")
+    test.assert(selects("\$[?@.a==\"True\"]",
+        "[{\"a\":\"True\"},{\"a\":true},{\"a\":\"SomethingElse\"}]",
+        ["[{\"a\":\"True\"}]"],
+        ["\$[0]"]))
+    test.case("filter, quoted True, single quotes")
+    test.assert(selects("\$[?@.a=='True']",
+        "[{\"a\":\"True\"},{\"a\":true},{\"a\":\"SomethingElse\"}]",
+        ["[{\"a\":\"True\"}]"],
+        ["\$[0]"]))
+    test.case("filter, false, incorrectly capitalized")
+    test.assert(refused("\$[?@==False]"))
+    test.case("filter, quoted False, double quotes")
+    test.assert(selects("\$[?@.a==\"False\"]",
+        "[{\"a\":\"False\"},{\"a\":false},{\"a\":\"SomethingElse\"}]",
+        ["[{\"a\":\"False\"}]"],
+        ["\$[0]"]))
+    test.case("filter, quoted False, single quotes")
+    test.assert(selects("\$[?@.a=='False']",
+        "[{\"a\":\"False\"},{\"a\":false},{\"a\":\"SomethingElse\"}]",
+        ["[{\"a\":\"False\"}]"],
+        ["\$[0]"]))
+    test.case("filter, null, incorrectly capitalized")
+    test.assert(refused("\$[?@==Null]"))
+    test.case("filter, quoted Null, double quotes")
+    test.assert(selects("\$[?@.a==\"Null\"]",
+        "[{\"a\":\"Null\"},{\"a\":null},{\"a\":\"SomethingElse\"}]",
+        ["[{\"a\":\"Null\"}]"],
+        ["\$[0]"]))
+    test.case("filter, quoted Null, single quotes")
+    test.assert(selects("\$[?@.a=='Null']",
+        "[{\"a\":\"Null\"},{\"a\":null},{\"a\":\"SomethingElse\"}]",
+        ["[{\"a\":\"Null\"}]"],
+        ["\$[0]"]))
+    test.case("index selector, first element")
+    test.assert(selects("\$[0]", "[\"first\",\"second\"]", ["[\"first\"]"], ["\$[0]"]))
+    test.case("index selector, second element")
+    test.assert(selects("\$[1]", "[\"first\",\"second\"]", ["[\"second\"]"], ["\$[1]"]))
+    test.case("index selector, out of bound")
+    test.assert(selects("\$[2]", "[\"first\",\"second\"]", ["[]"], [""]))
+    test.case("index selector, min exact index")
+    test.assert(selects("\$[-9007199254740991]", "[\"first\",\"second\"]", ["[]"], [""]))
+    test.case("index selector, max exact index")
+    test.assert(selects("\$[9007199254740991]", "[\"first\",\"second\"]", ["[]"], [""]))
+    test.case("index selector, min exact index - 1")
+    test.assert(refused("\$[-9007199254740992]"))
+    test.case("index selector, max exact index + 1")
+    test.assert(refused("\$[9007199254740992]"))
+    test.case("index selector, overflowing index")
+    test.assert(refused("\$[231584178474632390847141970017375815706539969331281128078915168015826259279872]"))
+    test.case("index selector, not actually an index, overflowing index leads into general text")
+    test.assert(refused("\$[231584178474632390847141970017375815706539969331281128078915168SomeRandomText]"))
+
+@test
+fn test_cts_006() [io]
+    test.case("index selector, negative")
+    test.assert(selects("\$[-1]", "[\"first\",\"second\"]", ["[\"second\"]"], ["\$[1]"]))
+    test.case("index selector, more negative")
+    test.assert(selects("\$[-2]", "[\"first\",\"second\"]", ["[\"first\"]"], ["\$[0]"]))
+    test.case("index selector, negative out of bound")
+    test.assert(selects("\$[-3]", "[\"first\",\"second\"]", ["[]"], [""]))
+    test.case("index selector, on object")
+    test.assert(selects("\$[0]", "{\"foo\":1}", ["[]"], [""]))
+    test.case("index selector, leading 0")
+    test.assert(refused("\$[01]"))
+    test.case("index selector, decimal")
+    test.assert(refused("\$[1.0]"))
+    test.case("index selector, plus")
+    test.assert(refused("\$[+1]"))
+    test.case("index selector, minus space")
+    test.assert(refused("\$[- 1]"))
+    test.case("index selector, -0")
+    test.assert(refused("\$[-0]"))
+    test.case("index selector, leading -0")
+    test.assert(refused("\$[-01]"))
+    test.case("index selector, null element")
+    test.assert(selects("\$[1]", "[\"first\",null,\"third\"]", ["[null]"], ["\$[1]"]))
+    test.case("name selector, double quotes")
+    test.assert(selects("\$[\"a\"]", "{\"a\":\"A\",\"b\":\"B\"}", ["[\"A\"]"], ["\$['a']"]))
+    test.case("name selector, double quotes, absent data")
+    test.assert(selects("\$[\"c\"]", "{\"a\":\"A\",\"b\":\"B\"}", ["[]"], [""]))
+    test.case("name selector, double quotes, array data")
+    test.assert(selects("\$[\"a\"]", "[\"first\",\"second\"]", ["[]"], [""]))
+    test.case("name selector, name, double quotes, contains single quote")
+    test.assert(selects("\$[\"a'\"]", "{\"a'\":\"A\",\"b\":\"B\"}", ["[\"A\"]"], ["\$['a\\'']"]))
+    test.case("name selector, name, double quotes, nested")
+    test.assert(selects("\$[\"a\"][\"b\"][\"c\"]", "{\"a\":{\"b\":{\"c\":\"C\"}}}", ["[\"C\"]"], ["\$['a']['b']['c']"]))
+    test.case("name selector, double quotes, embedded U+0001")
+    test.assert(refused("\$[\"\x01\"]"))
+    test.case("name selector, double quotes, embedded U+0002")
+    test.assert(refused("\$[\"\x02\"]"))
+    test.case("name selector, double quotes, embedded U+0003")
+    test.assert(refused("\$[\"\x03\"]"))
+    test.case("name selector, double quotes, embedded U+0004")
+    test.assert(refused("\$[\"\x04\"]"))
+    test.case("name selector, double quotes, embedded U+0005")
+    test.assert(refused("\$[\"\x05\"]"))
+    test.case("name selector, double quotes, embedded U+0006")
+    test.assert(refused("\$[\"\x06\"]"))
+    test.case("name selector, double quotes, embedded U+0007")
+    test.assert(refused("\$[\"\x07\"]"))
+    test.case("name selector, double quotes, embedded U+0008")
+    test.assert(refused("\$[\"\x08\"]"))
+    test.case("name selector, double quotes, embedded U+0009")
+    test.assert(refused("\$[\"\t\"]"))
+    test.case("name selector, double quotes, embedded U+000A")
+    test.assert(refused("\$[\"\n\"]"))
+    test.case("name selector, double quotes, embedded U+000B")
+    test.assert(refused("\$[\"\x0b\"]"))
+    test.case("name selector, double quotes, embedded U+000C")
+    test.assert(refused("\$[\"\x0c\"]"))
+    test.case("name selector, double quotes, embedded U+000D")
+    test.assert(refused("\$[\"\r\"]"))
+    test.case("name selector, double quotes, embedded U+000E")
+    test.assert(refused("\$[\"\x0e\"]"))
+    test.case("name selector, double quotes, embedded U+000F")
+    test.assert(refused("\$[\"\x0f\"]"))
+    test.case("name selector, double quotes, embedded U+0010")
+    test.assert(refused("\$[\"\x10\"]"))
+    test.case("name selector, double quotes, embedded U+0011")
+    test.assert(refused("\$[\"\x11\"]"))
+    test.case("name selector, double quotes, embedded U+0012")
+    test.assert(refused("\$[\"\x12\"]"))
+    test.case("name selector, double quotes, embedded U+0013")
+    test.assert(refused("\$[\"\x13\"]"))
+    test.case("name selector, double quotes, embedded U+0014")
+    test.assert(refused("\$[\"\x14\"]"))
+    test.case("name selector, double quotes, embedded U+0015")
+    test.assert(refused("\$[\"\x15\"]"))
+    test.case("name selector, double quotes, embedded U+0016")
+    test.assert(refused("\$[\"\x16\"]"))
+    test.case("name selector, double quotes, embedded U+0017")
+    test.assert(refused("\$[\"\x17\"]"))
+    test.case("name selector, double quotes, embedded U+0018")
+    test.assert(refused("\$[\"\x18\"]"))
+
+@test
+fn test_cts_007() [io]
+    test.case("name selector, double quotes, embedded U+0019")
+    test.assert(refused("\$[\"\x19\"]"))
+    test.case("name selector, double quotes, embedded U+001A")
+    test.assert(refused("\$[\"\x1a\"]"))
+    test.case("name selector, double quotes, embedded U+001B")
+    test.assert(refused("\$[\"\x1b\"]"))
+    test.case("name selector, double quotes, embedded U+001C")
+    test.assert(refused("\$[\"\x1c\"]"))
+    test.case("name selector, double quotes, embedded U+001D")
+    test.assert(refused("\$[\"\x1d\"]"))
+    test.case("name selector, double quotes, embedded U+001E")
+    test.assert(refused("\$[\"\x1e\"]"))
+    test.case("name selector, double quotes, embedded U+001F")
+    test.assert(refused("\$[\"\x1f\"]"))
+    test.case("name selector, double quotes, embedded U+0020")
+    test.assert(selects("\$[\" \"]", "{\" \":\"A\"}", ["[\"A\"]"], ["\$[' ']"]))
+    test.case("name selector, double quotes, embedded U+007F")
+    test.assert(selects("\$[\"\x7f\"]", "{\"\x7f\":\"A\"}", ["[\"A\"]"], ["\$['\x7f']"]))
+    test.case("name selector, double quotes, supplementary plane character")
+    test.assert(selects("\$[\"𝄞\"]", "{\"𝄞\":\"A\"}", ["[\"A\"]"], ["\$['𝄞']"]))
+    test.case("name selector, double quotes, escaped double quote")
+    test.assert(selects("\$[\"\\\"\"]", "{\"\\\"\":\"A\"}", ["[\"A\"]"], ["\$['\"']"]))
+    test.case("name selector, double quotes, escaped reverse solidus")
+    test.assert(selects("\$[\"\\\\\"]", "{\"\\\\\":\"A\"}", ["[\"A\"]"], ["\$['\\\\']"]))
+    test.case("name selector, double quotes, escaped solidus")
+    test.assert(selects("\$[\"\\/\"]", "{\"/\":\"A\"}", ["[\"A\"]"], ["\$['/']"]))
+    test.case("name selector, double quotes, escaped backspace")
+    test.assert(selects("\$[\"\\b\"]", "{\"\\u0008\":\"A\"}", ["[\"A\"]"], ["\$['\\b']"]))
+    test.case("name selector, double quotes, escaped form feed")
+    test.assert(selects("\$[\"\\f\"]", "{\"\\u000c\":\"A\"}", ["[\"A\"]"], ["\$['\\f']"]))
+    test.case("name selector, double quotes, escaped line feed")
+    test.assert(selects("\$[\"\\n\"]", "{\"\\n\":\"A\"}", ["[\"A\"]"], ["\$['\\n']"]))
+    test.case("name selector, double quotes, escaped carriage return")
+    test.assert(selects("\$[\"\\r\"]", "{\"\\r\":\"A\"}", ["[\"A\"]"], ["\$['\\r']"]))
+    test.case("name selector, double quotes, escaped tab")
+    test.assert(selects("\$[\"\\t\"]", "{\"\\t\":\"A\"}", ["[\"A\"]"], ["\$['\\t']"]))
+    test.case("name selector, double quotes, escaped ☺, upper case hex")
+    test.assert(selects("\$[\"\\u263A\"]", "{\"☺\":\"A\"}", ["[\"A\"]"], ["\$['☺']"]))
+    test.case("name selector, double quotes, escaped ☺, lower case hex")
+    test.assert(selects("\$[\"\\u263a\"]", "{\"☺\":\"A\"}", ["[\"A\"]"], ["\$['☺']"]))
+    test.case("name selector, double quotes, surrogate pair 𝄞")
+    test.assert(selects("\$[\"\\uD834\\uDD1E\"]", "{\"𝄞\":\"A\"}", ["[\"A\"]"], ["\$['𝄞']"]))
+    test.case("name selector, double quotes, surrogate pair 😀")
+    test.assert(selects("\$[\"\\uD83D\\uDE00\"]", "{\"😀\":\"A\"}", ["[\"A\"]"], ["\$['😀']"]))
+    test.case("name selector, double quotes, before high surrogates")
+    test.assert(selects("\$[\"\\uD7FF\\uD7FF\"]", "{\"퟿퟿\":\"A\"}", ["[\"A\"]"], ["\$['퟿퟿']"]))
+    test.case("name selector, double quotes, after low surrogates")
+    test.assert(selects("\$[\"\\uE000\\uE000\"]", "{\"\":\"A\"}", ["[\"A\"]"], ["\$['']"]))
+    test.case("name selector, double quotes, invalid escaped single quote")
+    test.assert(refused("\$[\"\\'\"]"))
+    test.case("name selector, double quotes, embedded double quote")
+    test.assert(refused("\$[\"\"\"]"))
+    test.case("name selector, double quotes, incomplete escape")
+    test.assert(refused("\$[\"\\\"]"))
+    test.case("name selector, double quotes, escape at end of line")
+    test.assert(refused("\$[\"\\\n\"]"))
+    test.case("name selector, double quotes, question mark escape")
+    test.assert(refused("\$[\"\\?\"]"))
+    test.case("name selector, double quotes, bell escape")
+    test.assert(refused("\$[\"\\a\"]"))
+    test.case("name selector, double quotes, vertical tab escape")
+    test.assert(refused("\$[\"\\v\"]"))
+    test.case("name selector, double quotes, 0 escape")
+    test.assert(refused("\$[\"\\0\"]"))
+    test.case("name selector, double quotes, x escape")
+    test.assert(refused("\$[\"\\x12\"]"))
+    test.case("name selector, double quotes, n escape")
+    test.assert(refused("\$[\"\\N{LATIN CAPITAL LETTER A}\"]"))
+    test.case("name selector, double quotes, unicode escape no hex")
+    test.assert(refused("\$[\"\\u\"]"))
+    test.case("name selector, double quotes, unicode escape too few hex")
+    test.assert(refused("\$[\"\\u123\"]"))
+    test.case("name selector, double quotes, unicode escape upper u")
+    test.assert(refused("\$[\"\\U1234\"]"))
+    test.case("name selector, double quotes, unicode escape upper u long")
+    test.assert(refused("\$[\"\\U0010FFFF\"]"))
+    test.case("name selector, double quotes, unicode escape plus")
+    test.assert(refused("\$[\"\\u+1234\"]"))
+    test.case("name selector, double quotes, unicode escape brackets")
+    test.assert(refused("\$[\"\\u{1234}\"]"))
+
+@test
+fn test_cts_008() [io]
+    test.case("name selector, double quotes, unicode escape brackets long")
+    test.assert(refused("\$[\"\\u{10ffff}\"]"))
+    test.case("name selector, double quotes, single high surrogate")
+    test.assert(refused("\$[\"\\uD800\"]"))
+    test.case("name selector, double quotes, single low surrogate")
+    test.assert(refused("\$[\"\\uDC00\"]"))
+    test.case("name selector, double quotes, high high surrogate")
+    test.assert(refused("\$[\"\\uD800\\uD800\"]"))
+    test.case("name selector, double quotes, low low surrogate")
+    test.assert(refused("\$[\"\\uDC00\\uDC00\"]"))
+    test.case("name selector, double quotes, surrogate non-surrogate")
+    test.assert(refused("\$[\"\\uD800\\u1234\"]"))
+    test.case("name selector, double quotes, non-surrogate surrogate")
+    test.assert(refused("\$[\"\\u1234\\uDC00\"]"))
+    test.case("name selector, double quotes, surrogate supplementary")
+    test.assert(refused("\$[\"\\uD800𝄞\"]"))
+    test.case("name selector, double quotes, supplementary surrogate")
+    test.assert(refused("\$[\"𝄞\\uDC00\"]"))
+    test.case("name selector, double quotes, surrogate incomplete low")
+    test.assert(refused("\$[\"\\uD800\\uDC0\"]"))
+    test.case("name selector, single quotes")
+    test.assert(selects("\$['a']", "{\"a\":\"A\",\"b\":\"B\"}", ["[\"A\"]"], ["\$['a']"]))
+    test.case("name selector, single quotes, absent data")
+    test.assert(selects("\$['c']", "{\"a\":\"A\",\"b\":\"B\"}", ["[]"], [""]))
+    test.case("name selector, single quotes, array data")
+    test.assert(selects("\$['a']", "[\"first\",\"second\"]", ["[]"], [""]))
+    test.case("name selector, single quotes, embedded U+0001")
+    test.assert(refused("\$['\x01']"))
+    test.case("name selector, single quotes, embedded U+0002")
+    test.assert(refused("\$['\x02']"))
+    test.case("name selector, single quotes, embedded U+0003")
+    test.assert(refused("\$['\x03']"))
+    test.case("name selector, single quotes, embedded U+0004")
+    test.assert(refused("\$['\x04']"))
+    test.case("name selector, single quotes, embedded U+0005")
+    test.assert(refused("\$['\x05']"))
+    test.case("name selector, single quotes, embedded U+0006")
+    test.assert(refused("\$['\x06']"))
+    test.case("name selector, single quotes, embedded U+0007")
+    test.assert(refused("\$['\x07']"))
+    test.case("name selector, single quotes, embedded U+0008")
+    test.assert(refused("\$['\x08']"))
+    test.case("name selector, single quotes, embedded U+0009")
+    test.assert(refused("\$['\t']"))
+    test.case("name selector, single quotes, embedded U+000A")
+    test.assert(refused("\$['\n']"))
+    test.case("name selector, single quotes, embedded U+000B")
+    test.assert(refused("\$['\x0b']"))
+    test.case("name selector, single quotes, embedded U+000C")
+    test.assert(refused("\$['\x0c']"))
+    test.case("name selector, single quotes, embedded U+000D")
+    test.assert(refused("\$['\r']"))
+    test.case("name selector, single quotes, embedded U+000E")
+    test.assert(refused("\$['\x0e']"))
+    test.case("name selector, single quotes, embedded U+000F")
+    test.assert(refused("\$['\x0f']"))
+    test.case("name selector, single quotes, embedded U+0010")
+    test.assert(refused("\$['\x10']"))
+    test.case("name selector, single quotes, embedded U+0011")
+    test.assert(refused("\$['\x11']"))
+    test.case("name selector, single quotes, embedded U+0012")
+    test.assert(refused("\$['\x12']"))
+    test.case("name selector, single quotes, embedded U+0013")
+    test.assert(refused("\$['\x13']"))
+    test.case("name selector, single quotes, embedded U+0014")
+    test.assert(refused("\$['\x14']"))
+    test.case("name selector, single quotes, embedded U+0015")
+    test.assert(refused("\$['\x15']"))
+    test.case("name selector, single quotes, embedded U+0016")
+    test.assert(refused("\$['\x16']"))
+    test.case("name selector, single quotes, embedded U+0017")
+    test.assert(refused("\$['\x17']"))
+    test.case("name selector, single quotes, embedded U+0018")
+    test.assert(refused("\$['\x18']"))
+    test.case("name selector, single quotes, embedded U+0019")
+    test.assert(refused("\$['\x19']"))
+    test.case("name selector, single quotes, embedded U+001A")
+    test.assert(refused("\$['\x1a']"))
+    test.case("name selector, single quotes, embedded U+001B")
+    test.assert(refused("\$['\x1b']"))
+
+@test
+fn test_cts_009() [io]
+    test.case("name selector, single quotes, embedded U+001C")
+    test.assert(refused("\$['\x1c']"))
+    test.case("name selector, single quotes, embedded U+001D")
+    test.assert(refused("\$['\x1d']"))
+    test.case("name selector, single quotes, embedded U+001E")
+    test.assert(refused("\$['\x1e']"))
+    test.case("name selector, single quotes, embedded U+001F")
+    test.assert(refused("\$['\x1f']"))
+    test.case("name selector, single quotes, embedded U+0020")
+    test.assert(selects("\$[' ']", "{\" \":\"A\"}", ["[\"A\"]"], ["\$[' ']"]))
+    test.case("name selector, single quotes, escaped single quote")
+    test.assert(selects("\$['\\'']", "{\"'\":\"A\"}", ["[\"A\"]"], ["\$['\\'']"]))
+    test.case("name selector, single quotes, escaped reverse solidus")
+    test.assert(selects("\$['\\\\']", "{\"\\\\\":\"A\"}", ["[\"A\"]"], ["\$['\\\\']"]))
+    test.case("name selector, single quotes, escaped solidus")
+    test.assert(selects("\$['\\/']", "{\"/\":\"A\"}", ["[\"A\"]"], ["\$['/']"]))
+    test.case("name selector, single quotes, escaped backspace")
+    test.assert(selects("\$['\\b']", "{\"\\u0008\":\"A\"}", ["[\"A\"]"], ["\$['\\b']"]))
+    test.case("name selector, single quotes, escaped form feed")
+    test.assert(selects("\$['\\f']", "{\"\\u000c\":\"A\"}", ["[\"A\"]"], ["\$['\\f']"]))
+    test.case("name selector, single quotes, escaped line feed")
+    test.assert(selects("\$['\\n']", "{\"\\n\":\"A\"}", ["[\"A\"]"], ["\$['\\n']"]))
+    test.case("name selector, single quotes, escaped carriage return")
+    test.assert(selects("\$['\\r']", "{\"\\r\":\"A\"}", ["[\"A\"]"], ["\$['\\r']"]))
+    test.case("name selector, single quotes, escaped tab")
+    test.assert(selects("\$['\\t']", "{\"\\t\":\"A\"}", ["[\"A\"]"], ["\$['\\t']"]))
+    test.case("name selector, single quotes, escaped ☺, upper case hex")
+    test.assert(selects("\$['\\u263A']", "{\"☺\":\"A\"}", ["[\"A\"]"], ["\$['☺']"]))
+    test.case("name selector, single quotes, escaped ☺, lower case hex")
+    test.assert(selects("\$['\\u263a']", "{\"☺\":\"A\"}", ["[\"A\"]"], ["\$['☺']"]))
+    test.case("name selector, single quotes, surrogate pair 𝄞")
+    test.assert(selects("\$['\\uD834\\uDD1E']", "{\"𝄞\":\"A\"}", ["[\"A\"]"], ["\$['𝄞']"]))
+    test.case("name selector, single quotes, surrogate pair 😀")
+    test.assert(selects("\$['\\uD83D\\uDE00']", "{\"😀\":\"A\"}", ["[\"A\"]"], ["\$['😀']"]))
+    test.case("name selector, single quotes, invalid escaped double quote")
+    test.assert(refused("\$['\\\"']"))
+    test.case("name selector, single quotes, embedded single quote")
+    test.assert(refused("\$[''']"))
+    test.case("name selector, single quotes, incomplete escape")
+    test.assert(refused("\$['\\']"))
+    test.case("name selector, double quotes, empty")
+    test.assert(selects("\$[\"\"]", "{\"a\":\"A\",\"b\":\"B\",\"\":\"C\"}", ["[\"C\"]"], ["\$['']"]))
+    test.case("name selector, single quotes, empty")
+    test.assert(selects("\$['']", "{\"a\":\"A\",\"b\":\"B\",\"\":\"C\"}", ["[\"C\"]"], ["\$['']"]))
+    test.case("slice selector, slice selector")
+    test.assert(selects("\$[1:3]", "[0,1,2,3,4,5,6,7,8,9]", ["[1,2]"], ["\$[1]\n\$[2]"]))
+    test.case("slice selector, slice selector with step")
+    test.assert(selects("\$[1:6:2]", "[0,1,2,3,4,5,6,7,8,9]", ["[1,3,5]"], ["\$[1]\n\$[3]\n\$[5]"]))
+    test.case("slice selector, slice selector with everything omitted, short form")
+    test.assert(selects("\$[:]", "[0,1,2,3]", ["[0,1,2,3]"], ["\$[0]\n\$[1]\n\$[2]\n\$[3]"]))
+    test.case("slice selector, slice selector with everything omitted, long form")
+    test.assert(selects("\$[::]", "[0,1,2,3]", ["[0,1,2,3]"], ["\$[0]\n\$[1]\n\$[2]\n\$[3]"]))
+    test.case("slice selector, slice selector with start omitted")
+    test.assert(selects("\$[:2]", "[0,1,2,3,4,5,6,7,8,9]", ["[0,1]"], ["\$[0]\n\$[1]"]))
+    test.case("slice selector, slice selector with start and end omitted")
+    test.assert(selects("\$[::2]", "[0,1,2,3,4,5,6,7,8,9]", ["[0,2,4,6,8]"], ["\$[0]\n\$[2]\n\$[4]\n\$[6]\n\$[8]"]))
+    test.case("slice selector, negative step with default start and end")
+    test.assert(selects("\$[::-1]", "[0,1,2,3]", ["[3,2,1,0]"], ["\$[3]\n\$[2]\n\$[1]\n\$[0]"]))
+    test.case("slice selector, negative step with default start")
+    test.assert(selects("\$[:0:-1]", "[0,1,2,3]", ["[3,2,1]"], ["\$[3]\n\$[2]\n\$[1]"]))
+    test.case("slice selector, negative step with default end")
+    test.assert(selects("\$[2::-1]", "[0,1,2,3]", ["[2,1,0]"], ["\$[2]\n\$[1]\n\$[0]"]))
+    test.case("slice selector, larger negative step")
+    test.assert(selects("\$[::-2]", "[0,1,2,3]", ["[3,1]"], ["\$[3]\n\$[1]"]))
+    test.case("slice selector, negative range with default step")
+    test.assert(selects("\$[-1:-3]", "[0,1,2,3,4,5,6,7,8,9]", ["[]"], [""]))
+    test.case("slice selector, negative range with negative step")
+    test.assert(selects("\$[-1:-3:-1]", "[0,1,2,3,4,5,6,7,8,9]", ["[9,8]"], ["\$[9]\n\$[8]"]))
+    test.case("slice selector, negative range with larger negative step")
+    test.assert(selects("\$[-1:-6:-2]", "[0,1,2,3,4,5,6,7,8,9]", ["[9,7,5]"], ["\$[9]\n\$[7]\n\$[5]"]))
+    test.case("slice selector, larger negative range with larger negative step")
+    test.assert(selects("\$[-1:-7:-2]", "[0,1,2,3,4,5,6,7,8,9]", ["[9,7,5]"], ["\$[9]\n\$[7]\n\$[5]"]))
+    test.case("slice selector, negative from, positive to")
+    test.assert(selects("\$[-5:7]", "[0,1,2,3,4,5,6,7,8,9]", ["[5,6]"], ["\$[5]\n\$[6]"]))
+    test.case("slice selector, negative from")
+    test.assert(selects("\$[-2:]", "[0,1,2,3,4,5,6,7,8,9]", ["[8,9]"], ["\$[8]\n\$[9]"]))
+    test.case("slice selector, positive from, negative to")
+    test.assert(selects("\$[1:-1]",
+        "[0,1,2,3,4,5,6,7,8,9]",
+        ["[1,2,3,4,5,6,7,8]"],
+        ["\$[1]\n\$[2]\n\$[3]\n\$[4]\n\$[5]\n\$[6]\n\$[7]\n\$[8]"]))
+    test.case("slice selector, negative from, positive to, negative step")
+    test.assert(selects("\$[-1:1:-1]",
+        "[0,1,2,3,4,5,6,7,8,9]",
+        ["[9,8,7,6,5,4,3,2]"],
+        ["\$[9]\n\$[8]\n\$[7]\n\$[6]\n\$[5]\n\$[4]\n\$[3]\n\$[2]"]))
+
+@test
+fn test_cts_010() [io]
+    test.case("slice selector, positive from, negative to, negative step")
+    test.assert(selects("\$[7:-5:-1]", "[0,1,2,3,4,5,6,7,8,9]", ["[7,6]"], ["\$[7]\n\$[6]"]))
+    test.case("slice selector, in serial, on nested array")
+    test.assert(selects("\$[1:3][1:2]",
+        "[[\"a\",\"b\",\"c\"],[\"d\",\"e\",\"f\"],[\"g\",\"h\",\"i\"]]",
+        ["[\"e\",\"h\"]"],
+        ["\$[1][1]\n\$[2][1]"]))
+    test.case("slice selector, in serial, on flat array")
+    test.assert(selects("\$[1:3][::]", "[0,1,2,3,4,5]", ["[]"], [""]))
+    test.case("slice selector, negative from, negative to, positive step")
+    test.assert(selects("\$[-5:-2]", "[0,1,2,3,4,5,6,7,8,9]", ["[5,6,7]"], ["\$[5]\n\$[6]\n\$[7]"]))
+    test.case("slice selector, too many colons")
+    test.assert(refused("\$[1:2:3:4]"))
+    test.case("slice selector, non-integer array index")
+    test.assert(refused("\$[1:2:a]"))
+    test.case("slice selector, zero step")
+    test.assert(selects("\$[1:2:0]", "[0,1,2,3,4,5,6,7,8,9]", ["[]"], [""]))
+    test.case("slice selector, empty range")
+    test.assert(selects("\$[2:2]", "[0,1,2,3,4,5,6,7,8,9]", ["[]"], [""]))
+    test.case("slice selector, slice selector with everything omitted with empty array")
+    test.assert(selects("\$[:]", "[]", ["[]"], [""]))
+    test.case("slice selector, negative step with empty array")
+    test.assert(selects("\$[::-1]", "[]", ["[]"], [""]))
+    test.case("slice selector, maximal range with positive step")
+    test.assert(selects("\$[0:10]",
+        "[0,1,2,3,4,5,6,7,8,9]",
+        ["[0,1,2,3,4,5,6,7,8,9]"],
+        ["\$[0]\n\$[1]\n\$[2]\n\$[3]\n\$[4]\n\$[5]\n\$[6]\n\$[7]\n\$[8]\n\$[9]"]))
+    test.case("slice selector, maximal range with negative step")
+    test.assert(selects("\$[9:0:-1]",
+        "[0,1,2,3,4,5,6,7,8,9]",
+        ["[9,8,7,6,5,4,3,2,1]"],
+        ["\$[9]\n\$[8]\n\$[7]\n\$[6]\n\$[5]\n\$[4]\n\$[3]\n\$[2]\n\$[1]"]))
+    test.case("slice selector, excessively large to value")
+    test.assert(selects("\$[2:113667776004]",
+        "[0,1,2,3,4,5,6,7,8,9]",
+        ["[2,3,4,5,6,7,8,9]"],
+        ["\$[2]\n\$[3]\n\$[4]\n\$[5]\n\$[6]\n\$[7]\n\$[8]\n\$[9]"]))
+    test.case("slice selector, excessively small from value")
+    test.assert(selects("\$[-113667776004:1]", "[0,1,2,3,4,5,6,7,8,9]", ["[0]"], ["\$[0]"]))
+    test.case("slice selector, excessively large from value with negative step")
+    test.assert(selects("\$[113667776004:0:-1]",
+        "[0,1,2,3,4,5,6,7,8,9]",
+        ["[9,8,7,6,5,4,3,2,1]"],
+        ["\$[9]\n\$[8]\n\$[7]\n\$[6]\n\$[5]\n\$[4]\n\$[3]\n\$[2]\n\$[1]"]))
+    test.case("slice selector, excessively small to value with negative step")
+    test.assert(selects("\$[3:-113667776004:-1]",
+        "[0,1,2,3,4,5,6,7,8,9]",
+        ["[3,2,1,0]"],
+        ["\$[3]\n\$[2]\n\$[1]\n\$[0]"]))
+    test.case("slice selector, excessively large step")
+    test.assert(selects("\$[1:10:113667776004]", "[0,1,2,3,4,5,6,7,8,9]", ["[1]"], ["\$[1]"]))
+    test.case("slice selector, excessively small step")
+    test.assert(selects("\$[-1:-10:-113667776004]", "[0,1,2,3,4,5,6,7,8,9]", ["[9]"], ["\$[9]"]))
+    test.case("slice selector, start, min exact")
+    test.assert(selects("\$[-9007199254740991::]", "[]", ["[]"], [""]))
+    test.case("slice selector, start, max exact")
+    test.assert(selects("\$[9007199254740991::]", "[]", ["[]"], [""]))
+    test.case("slice selector, start, min exact - 1")
+    test.assert(refused("\$[-9007199254740992::]"))
+    test.case("slice selector, start, max exact + 1")
+    test.assert(refused("\$[9007199254740992::]"))
+    test.case("slice selector, end, min exact")
+    test.assert(selects("\$[:-9007199254740991:]", "[]", ["[]"], [""]))
+    test.case("slice selector, end, max exact")
+    test.assert(selects("\$[:9007199254740991:]", "[]", ["[]"], [""]))
+    test.case("slice selector, end, min exact - 1")
+    test.assert(refused("\$[:-9007199254740992:]"))
+    test.case("slice selector, end, max exact + 1")
+    test.assert(refused("\$[:9007199254740992:]"))
+    test.case("slice selector, step, min exact")
+    test.assert(selects("\$[::-9007199254740991]", "[]", ["[]"], [""]))
+    test.case("slice selector, step, max exact")
+    test.assert(selects("\$[::9007199254740991]", "[]", ["[]"], [""]))
+    test.case("slice selector, step, min exact - 1")
+    test.assert(refused("\$[::-9007199254740992]"))
+    test.case("slice selector, step, max exact + 1")
+    test.assert(refused("\$[::9007199254740992]"))
+    test.case("slice selector, overflowing to value")
+    test.assert(refused("\$[2:231584178474632390847141970017375815706539969331281128078915168015826259279872]"))
+    test.case("slice selector, underflowing from value")
+    test.assert(refused("\$[-231584178474632390847141970017375815706539969331281128078915168015826259279872:1]"))
+    test.case("slice selector, overflowing from value with negative step")
+    test.assert(refused("\$[231584178474632390847141970017375815706539969331281128078915168015826259279872:0:-1]"))
+    test.case("slice selector, underflowing to value with negative step")
+    test.assert(refused("\$[3:-231584178474632390847141970017375815706539969331281128078915168015826259279872:-1]"))
+    test.case("slice selector, overflowing step")
+    test.assert(refused("\$[1:10:231584178474632390847141970017375815706539969331281128078915168015826259279872]"))
+    test.case("slice selector, underflowing step")
+    test.assert(refused("\$[-1:-10:-231584178474632390847141970017375815706539969331281128078915168015826259279872]"))
+    test.case("slice selector, start, leading 0")
+    test.assert(refused("\$[01::]"))
+    test.case("slice selector, start, decimal")
+    test.assert(refused("\$[1.0::]"))
+    test.case("slice selector, start, plus")
+    test.assert(refused("\$[+1::]"))
+    test.case("slice selector, start, minus space")
+    test.assert(refused("\$[- 1::]"))
+
+@test
+fn test_cts_011() [io]
+    test.case("slice selector, start, -0")
+    test.assert(refused("\$[-0::]"))
+    test.case("slice selector, start, leading -0")
+    test.assert(refused("\$[-01::]"))
+    test.case("slice selector, end, leading 0")
+    test.assert(refused("\$[:01:]"))
+    test.case("slice selector, end, decimal")
+    test.assert(refused("\$[:1.0:]"))
+    test.case("slice selector, end, plus")
+    test.assert(refused("\$[:+1:]"))
+    test.case("slice selector, end, minus space")
+    test.assert(refused("\$[:- 1:]"))
+    test.case("slice selector, end, -0")
+    test.assert(refused("\$[:-0:]"))
+    test.case("slice selector, end, leading -0")
+    test.assert(refused("\$[:-01:]"))
+    test.case("slice selector, step, leading 0")
+    test.assert(refused("\$[::01]"))
+    test.case("slice selector, step, decimal")
+    test.assert(refused("\$[::1.0]"))
+    test.case("slice selector, step, plus")
+    test.assert(refused("\$[::+1]"))
+    test.case("slice selector, step, minus space")
+    test.assert(refused("\$[::- 1]"))
+    test.case("slice selector, step, -0")
+    test.assert(refused("\$[::-0]"))
+    test.case("slice selector, step, leading -0")
+    test.assert(refused("\$[::-01]"))
+    test.case("slice selector, explicit start, omitted end and step")
+    test.assert(selects("\$[9::]", "[0,1,2,3,4,5,6,7,8,9]", ["[9]"], ["\$[9]"]))
+    test.case("slice selector, explicit start equal to length, omitted end and step")
+    test.assert(selects("\$[10::]", "[0,1,2,3,4,5,6,7,8,9]", ["[]"], [""]))
+    test.case("functions, count, count function")
+    test.assert(selects("\$[?count(@..*)>2]",
+        "[{\"a\":[1,2,3]},{\"a\":[1],\"d\":\"f\"},{\"a\":1,\"d\":\"f\"}]",
+        ["[{\"a\":[1,2,3]},{\"a\":[1],\"d\":\"f\"}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("functions, count, single-node arg")
+    test.assert(selects("\$[?count(@.a)>1]",
+        "[{\"a\":[1,2,3]},{\"a\":[1],\"d\":\"f\"},{\"a\":1,\"d\":\"f\"}]",
+        ["[]"],
+        [""]))
+    test.case("functions, count, multiple-selector arg")
+    test.assert(selects("\$[?count(@['a','d'])>1]",
+        "[{\"a\":[1,2,3]},{\"a\":[1],\"d\":\"f\"},{\"a\":1,\"d\":\"f\"}]",
+        ["[{\"a\":[1],\"d\":\"f\"},{\"a\":1,\"d\":\"f\"}]"],
+        ["\$[1]\n\$[2]"]))
+    test.case("functions, count, non-query arg, number")
+    test.assert(refused("\$[?count(1)>2]"))
+    test.case("functions, count, non-query arg, string")
+    test.assert(refused("\$[?count('string')>2]"))
+    test.case("functions, count, non-query arg, true")
+    test.assert(refused("\$[?count(true)>2]"))
+    test.case("functions, count, non-query arg, false")
+    test.assert(refused("\$[?count(false)>2]"))
+    test.case("functions, count, non-query arg, null")
+    test.assert(refused("\$[?count(null)>2]"))
+    test.case("functions, count, result must be compared")
+    test.assert(refused("\$[?count(@..*)]"))
+    test.case("functions, count, no params")
+    test.assert(refused("\$[?count()==1]"))
+    test.case("functions, count, too many params")
+    test.assert(refused("\$[?count(@.a,@.b)==1]"))
+    test.case("functions, length, string data")
+    test.assert(selects("\$[?length(@.a)>=2]", "[{\"a\":\"ab\"},{\"a\":\"d\"}]", ["[{\"a\":\"ab\"}]"], ["\$[0]"]))
+    test.case("functions, length, string data, unicode")
+    test.assert(selects("\$[?length(@)==2]",
+        "[\"☺\",\"☺☺\",\"☺☺☺\",\"ж\",\"жж\",\"жжж\",\"磨\",\"阿美\",\"形声字\"]",
+        ["[\"☺☺\",\"жж\",\"阿美\"]"],
+        ["\$[1]\n\$[4]\n\$[7]"]))
+    test.case("functions, length, array data")
+    test.assert(selects("\$[?length(@.a)>=2]", "[{\"a\":[1,2,3]},{\"a\":[1]}]", ["[{\"a\":[1,2,3]}]"], ["\$[0]"]))
+    test.case("functions, length, missing data")
+    test.assert(selects("\$[?length(@.a)>=2]", "[{\"d\":\"f\"}]", ["[]"], [""]))
+    test.case("functions, length, number arg")
+    test.assert(selects("\$[?length(1)>=2]", "[{\"d\":\"f\"}]", ["[]"], [""]))
+    test.case("functions, length, true arg")
+    test.assert(selects("\$[?length(true)>=2]", "[{\"d\":\"f\"}]", ["[]"], [""]))
+    test.case("functions, length, false arg")
+    test.assert(selects("\$[?length(false)>=2]", "[{\"d\":\"f\"}]", ["[]"], [""]))
+    test.case("functions, length, null arg")
+    test.assert(selects("\$[?length(null)>=2]", "[{\"d\":\"f\"}]", ["[]"], [""]))
+    test.case("functions, length, result must be compared")
+    test.assert(refused("\$[?length(@.a)]"))
+    test.case("functions, length, no params")
+    test.assert(refused("\$[?length()==1]"))
+    test.case("functions, length, too many params")
+    test.assert(refused("\$[?length(@.a,@.b)==1]"))
+    test.case("functions, length, non-singular query arg")
+    test.assert(refused("\$[?length(@.*)<3]"))
+    test.case("functions, length, arg is a function expression")
+    test.assert(selects("\$.values[?length(@.a)==length(value(\$..c))]",
+        "{\"c\":\"cd\",\"values\":[{\"a\":\"ab\"},{\"a\":\"d\"}]}",
+        ["[{\"a\":\"ab\"}]"],
+        ["\$['values'][0]"]))
+
+@test
+fn test_cts_012() [io]
+    test.case("functions, length, arg is special nothing")
+    test.assert(selects("\$[?length(value(@.a))>0]",
+        "[{\"a\":\"ab\"},{\"c\":\"d\"},{\"a\":null}]",
+        ["[{\"a\":\"ab\"}]"],
+        ["\$[0]"]))
+    test.case("functions, length, non-singular query arg, multiple index selectors")
+    test.assert(refused("\$[?length(@[1, 2])<3]"))
+    test.case("functions, length, non-singular query arg, multiple name selectors")
+    test.assert(refused("\$[?length(@['a', 'b'])<3]"))
+    test.case("functions, match, found match")
+    test.assert(selects("\$[?match(@.a, 'a.*')]", "[{\"a\":\"ab\"}]", ["[{\"a\":\"ab\"}]"], ["\$[0]"]))
+    test.case("functions, match, double quotes")
+    test.assert(selects("\$[?match(@.a, \"a.*\")]", "[{\"a\":\"ab\"}]", ["[{\"a\":\"ab\"}]"], ["\$[0]"]))
+    test.case("functions, match, regex from the document")
+    test.assert(selects("\$.values[?match(@, \$.regex)]",
+        "{\"regex\":\"b.?b\",\"values\":[\"abc\",\"bcd\",\"bab\",\"bba\",\"bbab\",\"b\",true,[],{}]}",
+        ["[\"bab\"]"],
+        ["\$['values'][2]"]))
+    test.case("functions, match, don't select match")
+    test.assert(selects("\$[?!match(@.a, 'a.*')]", "[{\"a\":\"ab\"}]", ["[]"], [""]))
+    test.case("functions, match, not a match")
+    test.assert(selects("\$[?match(@.a, 'a.*')]", "[{\"a\":\"bc\"}]", ["[]"], [""]))
+    test.case("functions, match, select non-match")
+    test.assert(selects("\$[?!match(@.a, 'a.*')]", "[{\"a\":\"bc\"}]", ["[{\"a\":\"bc\"}]"], ["\$[0]"]))
+    test.case("functions, match, non-string first arg")
+    test.assert(selects("\$[?match(1, 'a.*')]", "[{\"a\":\"bc\"}]", ["[]"], [""]))
+    test.case("functions, match, non-string second arg")
+    test.assert(selects("\$[?match(@.a, 1)]", "[{\"a\":\"bc\"}]", ["[]"], [""]))
+    test.case("functions, match, filter, match function, unicode char class, uppercase")
+    test.assert(selects("\$[?match(@, '\\\\p{Lu}')]",
+        "[\"ж\",\"Ж\",\"1\",\"жЖ\",true,[],{}]",
+        ["[\"Ж\"]"],
+        ["\$[1]"]))
+    test.case("functions, match, filter, match function, unicode char class negated, uppercase")
+    test.assert(selects("\$[?match(@, '\\\\P{Lu}')]",
+        "[\"ж\",\"Ж\",\"1\",true,[],{}]",
+        ["[\"ж\",\"1\"]"],
+        ["\$[0]\n\$[2]"]))
+    test.case("functions, match, filter, match function, unicode, surrogate pair")
+    test.assert(selects("\$[?match(@, 'a.b')]", "[\"a𐄁b\",\"ab\",\"1\",true,[],{}]", ["[\"a𐄁b\"]"], ["\$[0]"]))
+    test.case("functions, match, dot matcher on \\u2028")
+    test.assert(selects("\$[?match(@, '.')]", "[\" \",\"\\r\",\"\\n\",true,[],{}]", ["[\" \"]"], ["\$[0]"]))
+    test.case("functions, match, dot matcher on \\u2029")
+    test.assert(selects("\$[?match(@, '.')]", "[\" \",\"\\r\",\"\\n\",true,[],{}]", ["[\" \"]"], ["\$[0]"]))
+    test.case("functions, match, result cannot be compared")
+    test.assert(refused("\$[?match(@.a, 'a.*')==true]"))
+    test.case("functions, match, too few params")
+    test.assert(refused("\$[?match(@.a)==1]"))
+    test.case("functions, match, too many params")
+    test.assert(refused("\$[?match(@.a,@.b,@.c)==1]"))
+    test.case("functions, match, arg is a function expression")
+    test.assert(selects("\$.values[?match(@.a, value(\$..['regex']))]",
+        "{\"regex\":\"a.*\",\"values\":[{\"a\":\"ab\"},{\"a\":\"ba\"}]}",
+        ["[{\"a\":\"ab\"}]"],
+        ["\$['values'][0]"]))
+    test.case("functions, match, dot in character class")
+    test.assert(selects("\$[?match(@, 'a[.b]c')]",
+        "[\"abc\",\"a.c\",\"axc\"]",
+        ["[\"abc\",\"a.c\"]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("functions, match, escaped dot")
+    test.assert(selects("\$[?match(@, 'a\\\\.c')]", "[\"abc\",\"a.c\",\"axc\"]", ["[\"a.c\"]"], ["\$[1]"]))
+    test.case("functions, match, escaped backslash before dot")
+    test.assert(selects("\$[?match(@, 'a\\\\\\\\.c')]",
+        "[\"abc\",\"a.c\",\"axc\",\"a\\\\ c\"]",
+        ["[\"a\\\\ c\"]"],
+        ["\$[3]"]))
+    test.case("functions, match, escaped left square bracket")
+    test.assert(selects("\$[?match(@, 'a\\\\[.c')]", "[\"abc\",\"a.c\",\"a[ c\"]", ["[\"a[ c\"]"], ["\$[2]"]))
+    test.case("functions, match, escaped right square bracket")
+    test.assert(selects("\$[?match(@, 'a[\\\\].]c')]",
+        "[\"abc\",\"a.c\",\"a c\",\"a]c\"]",
+        ["[\"a.c\",\"a]c\"]"],
+        ["\$[1]\n\$[3]"]))
+    test.case("functions, search, at the end")
+    test.assert(selects("\$[?search(@.a, 'a.*')]",
+        "[{\"a\":\"the end is ab\"}]",
+        ["[{\"a\":\"the end is ab\"}]"],
+        ["\$[0]"]))
+    test.case("functions, search, double quotes")
+    test.assert(selects("\$[?search(@.a, \"a.*\")]",
+        "[{\"a\":\"the end is ab\"}]",
+        ["[{\"a\":\"the end is ab\"}]"],
+        ["\$[0]"]))
+    test.case("functions, search, at the start")
+    test.assert(selects("\$[?search(@.a, 'a.*')]",
+        "[{\"a\":\"ab is at the start\"}]",
+        ["[{\"a\":\"ab is at the start\"}]"],
+        ["\$[0]"]))
+    test.case("functions, search, in the middle")
+    test.assert(selects("\$[?search(@.a, 'a.*')]",
+        "[{\"a\":\"contains two matches\"}]",
+        ["[{\"a\":\"contains two matches\"}]"],
+        ["\$[0]"]))
+    test.case("functions, search, regex from the document")
+    test.assert(selects("\$.values[?search(@, \$.regex)]",
+        "{\"regex\":\"b.?b\",\"values\":[\"abc\",\"bcd\",\"bab\",\"bba\",\"bbab\",\"b\",true,[],{}]}",
+        ["[\"bab\",\"bba\",\"bbab\"]"],
+        ["\$['values'][2]\n\$['values'][3]\n\$['values'][4]"]))
+    test.case("functions, search, don't select match")
+    test.assert(selects("\$[?!search(@.a, 'a.*')]", "[{\"a\":\"contains two matches\"}]", ["[]"], [""]))
+    test.case("functions, search, not a match")
+    test.assert(selects("\$[?search(@.a, 'a.*')]", "[{\"a\":\"bc\"}]", ["[]"], [""]))
+    test.case("functions, search, select non-match")
+    test.assert(selects("\$[?!search(@.a, 'a.*')]", "[{\"a\":\"bc\"}]", ["[{\"a\":\"bc\"}]"], ["\$[0]"]))
+    test.case("functions, search, non-string first arg")
+    test.assert(selects("\$[?search(1, 'a.*')]", "[{\"a\":\"bc\"}]", ["[]"], [""]))
+    test.case("functions, search, non-string second arg")
+    test.assert(selects("\$[?search(@.a, 1)]", "[{\"a\":\"bc\"}]", ["[]"], [""]))
+    test.case("functions, search, filter, search function, unicode char class, uppercase")
+    test.assert(selects("\$[?search(@, '\\\\p{Lu}')]",
+        "[\"ж\",\"Ж\",\"1\",\"жЖ\",true,[],{}]",
+        ["[\"Ж\",\"жЖ\"]"],
+        ["\$[1]\n\$[3]"]))
+    test.case("functions, search, filter, search function, unicode char class negated, uppercase")
+    test.assert(selects("\$[?search(@, '\\\\P{Lu}')]",
+        "[\"ж\",\"Ж\",\"1\",true,[],{}]",
+        ["[\"ж\",\"1\"]"],
+        ["\$[0]\n\$[2]"]))
+    test.case("functions, search, filter, search function, unicode, surrogate pair")
+    test.assert(selects("\$[?search(@, 'a.b')]",
+        "[\"a𐄁bc\",\"abc\",\"1\",true,[],{}]",
+        ["[\"a𐄁bc\"]"],
+        ["\$[0]"]))
+    test.case("functions, search, dot matcher on \\u2028")
+    test.assert(selects("\$[?search(@, '.')]",
+        "[\" \",\"\\r \\n\",\"\\r\",\"\\n\",true,[],{}]",
+        ["[\" \",\"\\r \\n\"]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("functions, search, dot matcher on \\u2029")
+    test.assert(selects("\$[?search(@, '.')]",
+        "[\" \",\"\\r \\n\",\"\\r\",\"\\n\",true,[],{}]",
+        ["[\" \",\"\\r \\n\"]"],
+        ["\$[0]\n\$[1]"]))
+
+@test
+fn test_cts_013() [io]
+    test.case("functions, search, result cannot be compared")
+    test.assert(refused("\$[?search(@.a, 'a.*')==true]"))
+    test.case("functions, search, too few params")
+    test.assert(refused("\$[?search(@.a)]"))
+    test.case("functions, search, too many params")
+    test.assert(refused("\$[?search(@.a,@.b,@.c)]"))
+    test.case("functions, search, arg is a function expression")
+    test.assert(selects("\$.values[?search(@, value(\$..['regex']))]",
+        "{\"regex\":\"b.?b\",\"values\":[\"abc\",\"bcd\",\"bab\",\"bba\",\"bbab\",\"b\",true,[],{}]}",
+        ["[\"bab\",\"bba\",\"bbab\"]"],
+        ["\$['values'][2]\n\$['values'][3]\n\$['values'][4]"]))
+    test.case("functions, search, dot in character class")
+    test.assert(selects("\$[?search(@, 'a[.b]c')]",
+        "[\"x abc y\",\"x a.c y\",\"x axc y\"]",
+        ["[\"x abc y\",\"x a.c y\"]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("functions, search, escaped dot")
+    test.assert(selects("\$[?search(@, 'a\\\\.c')]",
+        "[\"x abc y\",\"x a.c y\",\"x axc y\"]",
+        ["[\"x a.c y\"]"],
+        ["\$[1]"]))
+    test.case("functions, search, escaped backslash before dot")
+    test.assert(selects("\$[?search(@, 'a\\\\\\\\.c')]",
+        "[\"x abc y\",\"x a.c y\",\"x axc y\",\"x a\\\\ c y\"]",
+        ["[\"x a\\\\ c y\"]"],
+        ["\$[3]"]))
+    test.case("functions, search, escaped left square bracket")
+    test.assert(selects("\$[?search(@, 'a\\\\[.c')]",
+        "[\"x abc y\",\"x a.c y\",\"x a[ c y\"]",
+        ["[\"x a[ c y\"]"],
+        ["\$[2]"]))
+    test.case("functions, search, escaped right square bracket")
+    test.assert(selects("\$[?search(@, 'a[\\\\].]c')]",
+        "[\"x abc y\",\"x a.c y\",\"x a c y\",\"x a]c y\"]",
+        ["[\"x a.c y\",\"x a]c y\"]"],
+        ["\$[1]\n\$[3]"]))
+    test.case("functions, value, single-value nodelist")
+    test.assert(selects("\$[?value(@.*)==4]",
+        "[[4],{\"foo\":4},[5],{\"foo\":5},4]",
+        ["[[4],{\"foo\":4}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("functions, value, multi-value nodelist")
+    test.assert(selects("\$[?value(@.*)==4]", "[[4,4],{\"foo\":4,\"bar\":4}]", ["[]"], [""]))
+    test.case("functions, value, too few params")
+    test.assert(refused("\$[?value()==4]"))
+    test.case("functions, value, too many params")
+    test.assert(refused("\$[?value(@.a,@.b)==4]"))
+    test.case("functions, value, result must be compared")
+    test.assert(refused("\$[?value(@.a)]"))
+    test.case("whitespace, filter, space between question mark and expression")
+    test.assert(selects("\$[? @.a]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, newline between question mark and expression")
+    test.assert(selects("\$[?\n@.a]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, tab between question mark and expression")
+    test.assert(selects("\$[?\t@.a]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, return between question mark and expression")
+    test.assert(selects("\$[?\r@.a]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, space between question mark and parenthesized expression")
+    test.assert(selects("\$[? (@.a)]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, newline between question mark and parenthesized expression")
+    test.assert(selects("\$[?\n(@.a)]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, tab between question mark and parenthesized expression")
+    test.assert(selects("\$[?\t(@.a)]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, return between question mark and parenthesized expression")
+    test.assert(selects("\$[?\r(@.a)]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, space between parenthesized expression and bracket")
+    test.assert(selects("\$[?(@.a) ]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, newline between parenthesized expression and bracket")
+    test.assert(selects("\$[?(@.a)\n]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, tab between parenthesized expression and bracket")
+    test.assert(selects("\$[?(@.a)\t]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, return between parenthesized expression and bracket")
+    test.assert(selects("\$[?(@.a)\r]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, space between bracket and question mark")
+    test.assert(selects("\$[ ?@.a]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, newline between bracket and question mark")
+    test.assert(selects("\$[\n?@.a]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, tab between bracket and question mark")
+    test.assert(selects("\$[\t?@.a]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, filter, return between bracket and question mark")
+    test.assert(selects("\$[\r?@.a]",
+        "[{\"a\":\"b\",\"d\":\"e\"},{\"b\":\"c\",\"d\":\"f\"}]",
+        ["[{\"a\":\"b\",\"d\":\"e\"}]"],
+        ["\$[0]"]))
+    test.case("whitespace, functions, space between function name and parenthesis")
+    test.assert(refused("\$[?count (@.*)==1]"))
+    test.case("whitespace, functions, newline between function name and parenthesis")
+    test.assert(refused("\$[?count\n(@.*)==1]"))
+    test.case("whitespace, functions, tab between function name and parenthesis")
+    test.assert(refused("\$[?count\t(@.*)==1]"))
+    test.case("whitespace, functions, return between function name and parenthesis")
+    test.assert(refused("\$[?count\r(@.*)==1]"))
+    test.case("whitespace, functions, space between parenthesis and arg")
+    test.assert(selects("\$[?count( @.*)==1]",
+        "[{\"a\":1},{\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, functions, newline between parenthesis and arg")
+    test.assert(selects("\$[?count(\n@.*)==1]",
+        "[{\"a\":1},{\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, functions, tab between parenthesis and arg")
+    test.assert(selects("\$[?count(\t@.*)==1]",
+        "[{\"a\":1},{\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, functions, return between parenthesis and arg")
+    test.assert(selects("\$[?count(\r@.*)==1]",
+        "[{\"a\":1},{\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, functions, space between arg and comma")
+    test.assert(selects("\$[?search(@ ,'[a-z]+')]", "[\"foo\",\"123\"]", ["[\"foo\"]"], ["\$[0]"]))
+    test.case("whitespace, functions, newline between arg and comma")
+    test.assert(selects("\$[?search(@\n,'[a-z]+')]", "[\"foo\",\"123\"]", ["[\"foo\"]"], ["\$[0]"]))
+
+@test
+fn test_cts_014() [io]
+    test.case("whitespace, functions, tab between arg and comma")
+    test.assert(selects("\$[?search(@\t,'[a-z]+')]", "[\"foo\",\"123\"]", ["[\"foo\"]"], ["\$[0]"]))
+    test.case("whitespace, functions, return between arg and comma")
+    test.assert(selects("\$[?search(@\r,'[a-z]+')]", "[\"foo\",\"123\"]", ["[\"foo\"]"], ["\$[0]"]))
+    test.case("whitespace, functions, space between comma and arg")
+    test.assert(selects("\$[?search(@, '[a-z]+')]", "[\"foo\",\"123\"]", ["[\"foo\"]"], ["\$[0]"]))
+    test.case("whitespace, functions, newline between comma and arg")
+    test.assert(selects("\$[?search(@,\n'[a-z]+')]", "[\"foo\",\"123\"]", ["[\"foo\"]"], ["\$[0]"]))
+    test.case("whitespace, functions, tab between comma and arg")
+    test.assert(selects("\$[?search(@,\t'[a-z]+')]", "[\"foo\",\"123\"]", ["[\"foo\"]"], ["\$[0]"]))
+    test.case("whitespace, functions, return between comma and arg")
+    test.assert(selects("\$[?search(@,\r'[a-z]+')]", "[\"foo\",\"123\"]", ["[\"foo\"]"], ["\$[0]"]))
+    test.case("whitespace, functions, space between arg and parenthesis")
+    test.assert(selects("\$[?count(@.* )==1]",
+        "[{\"a\":1},{\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, functions, newline between arg and parenthesis")
+    test.assert(selects("\$[?count(@.*\n)==1]",
+        "[{\"a\":1},{\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, functions, tab between arg and parenthesis")
+    test.assert(selects("\$[?count(@.*\t)==1]",
+        "[{\"a\":1},{\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, functions, return between arg and parenthesis")
+    test.assert(selects("\$[?count(@.*\r)==1]",
+        "[{\"a\":1},{\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, functions, spaces in a relative singular selector")
+    test.assert(selects("\$[?length(@ .a .b) == 3]",
+        "[{\"a\":{\"b\":\"foo\"}},{}]",
+        ["[{\"a\":{\"b\":\"foo\"}}]"],
+        ["\$[0]"]))
+    test.case("whitespace, functions, newlines in a relative singular selector")
+    test.assert(selects("\$[?length(@\n.a\n.b) == 3]",
+        "[{\"a\":{\"b\":\"foo\"}},{}]",
+        ["[{\"a\":{\"b\":\"foo\"}}]"],
+        ["\$[0]"]))
+    test.case("whitespace, functions, tabs in a relative singular selector")
+    test.assert(selects("\$[?length(@\t.a\t.b) == 3]",
+        "[{\"a\":{\"b\":\"foo\"}},{}]",
+        ["[{\"a\":{\"b\":\"foo\"}}]"],
+        ["\$[0]"]))
+    test.case("whitespace, functions, returns in a relative singular selector")
+    test.assert(selects("\$[?length(@\r.a\r.b) == 3]",
+        "[{\"a\":{\"b\":\"foo\"}},{}]",
+        ["[{\"a\":{\"b\":\"foo\"}}]"],
+        ["\$[0]"]))
+    test.case("whitespace, functions, spaces in an absolute singular selector")
+    test.assert(selects("\$..[?length(@)==length(\$ [0] .a)]", "[{\"a\":\"foo\"},{}]", ["[\"foo\"]"], ["\$[0]['a']"]))
+    test.case("whitespace, functions, newlines in an absolute singular selector")
+    test.assert(selects("\$..[?length(@)==length(\$\n[0]\n.a)]", "[{\"a\":\"foo\"},{}]", ["[\"foo\"]"], ["\$[0]['a']"]))
+    test.case("whitespace, functions, tabs in an absolute singular selector")
+    test.assert(selects("\$..[?length(@)==length(\$\t[0]\t.a)]", "[{\"a\":\"foo\"},{}]", ["[\"foo\"]"], ["\$[0]['a']"]))
+    test.case("whitespace, functions, returns in an absolute singular selector")
+    test.assert(selects("\$..[?length(@)==length(\$\r[0]\r.a)]", "[{\"a\":\"foo\"},{}]", ["[\"foo\"]"], ["\$[0]['a']"]))
+    test.case("whitespace, operators, space before ||")
+    test.assert(selects("\$[?@.a ||@.b]",
+        "[{\"a\":1},{\"b\":2},{\"c\":3}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, newline before ||")
+    test.assert(selects("\$[?@.a\n||@.b]",
+        "[{\"a\":1},{\"b\":2},{\"c\":3}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, tab before ||")
+    test.assert(selects("\$[?@.a\t||@.b]",
+        "[{\"a\":1},{\"b\":2},{\"c\":3}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, return before ||")
+    test.assert(selects("\$[?@.a\r||@.b]",
+        "[{\"a\":1},{\"b\":2},{\"c\":3}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, space after ||")
+    test.assert(selects("\$[?@.a|| @.b]",
+        "[{\"a\":1},{\"b\":2},{\"c\":3}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, newline after ||")
+    test.assert(selects("\$[?@.a||\n@.b]",
+        "[{\"a\":1},{\"b\":2},{\"c\":3}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, tab after ||")
+    test.assert(selects("\$[?@.a||\t@.b]",
+        "[{\"a\":1},{\"b\":2},{\"c\":3}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, return after ||")
+    test.assert(selects("\$[?@.a||\r@.b]",
+        "[{\"a\":1},{\"b\":2},{\"c\":3}]",
+        ["[{\"a\":1},{\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, space before &&")
+    test.assert(selects("\$[?@.a &&@.b]",
+        "[{\"a\":1},{\"b\":2},{\"a\":1,\"b\":2}]",
+        ["[{\"a\":1,\"b\":2}]"],
+        ["\$[2]"]))
+    test.case("whitespace, operators, newline before &&")
+    test.assert(selects("\$[?@.a\n&&@.b]",
+        "[{\"a\":1},{\"b\":2},{\"a\":1,\"b\":2}]",
+        ["[{\"a\":1,\"b\":2}]"],
+        ["\$[2]"]))
+    test.case("whitespace, operators, tab before &&")
+    test.assert(selects("\$[?@.a\t&&@.b]",
+        "[{\"a\":1},{\"b\":2},{\"a\":1,\"b\":2}]",
+        ["[{\"a\":1,\"b\":2}]"],
+        ["\$[2]"]))
+    test.case("whitespace, operators, return before &&")
+    test.assert(selects("\$[?@.a\r&&@.b]",
+        "[{\"a\":1},{\"b\":2},{\"a\":1,\"b\":2}]",
+        ["[{\"a\":1,\"b\":2}]"],
+        ["\$[2]"]))
+    test.case("whitespace, operators, space after &&")
+    test.assert(selects("\$[?@.a&& @.b]",
+        "[{\"a\":1},{\"b\":2},{\"a\":1,\"b\":2}]",
+        ["[{\"a\":1,\"b\":2}]"],
+        ["\$[2]"]))
+    test.case("whitespace, operators, newline after &&")
+    test.assert(selects("\$[?@.a&& @.b]",
+        "[{\"a\":1},{\"b\":2},{\"a\":1,\"b\":2}]",
+        ["[{\"a\":1,\"b\":2}]"],
+        ["\$[2]"]))
+    test.case("whitespace, operators, tab after &&")
+    test.assert(selects("\$[?@.a&& @.b]",
+        "[{\"a\":1},{\"b\":2},{\"a\":1,\"b\":2}]",
+        ["[{\"a\":1,\"b\":2}]"],
+        ["\$[2]"]))
+    test.case("whitespace, operators, return after &&")
+    test.assert(selects("\$[?@.a&& @.b]",
+        "[{\"a\":1},{\"b\":2},{\"a\":1,\"b\":2}]",
+        ["[{\"a\":1,\"b\":2}]"],
+        ["\$[2]"]))
+    test.case("whitespace, operators, space before ==")
+    test.assert(selects("\$[?@.a ==@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":1}]"], ["\$[0]"]))
+    test.case("whitespace, operators, newline before ==")
+    test.assert(selects("\$[?@.a\n==@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":1}]"], ["\$[0]"]))
+    test.case("whitespace, operators, tab before ==")
+    test.assert(selects("\$[?@.a\t==@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":1}]"], ["\$[0]"]))
+    test.case("whitespace, operators, return before ==")
+    test.assert(selects("\$[?@.a\r==@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":1}]"], ["\$[0]"]))
+    test.case("whitespace, operators, space after ==")
+    test.assert(selects("\$[?@.a== @.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":1}]"], ["\$[0]"]))
+    test.case("whitespace, operators, newline after ==")
+    test.assert(selects("\$[?@.a==\n@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":1}]"], ["\$[0]"]))
+
+@test
+fn test_cts_015() [io]
+    test.case("whitespace, operators, tab after ==")
+    test.assert(selects("\$[?@.a==\t@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":1}]"], ["\$[0]"]))
+    test.case("whitespace, operators, return after ==")
+    test.assert(selects("\$[?@.a==\r@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":1}]"], ["\$[0]"]))
+    test.case("whitespace, operators, space before !=")
+    test.assert(selects("\$[?@.a !=@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, newline before !=")
+    test.assert(selects("\$[?@.a\n!=@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, tab before !=")
+    test.assert(selects("\$[?@.a\t!=@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, return before !=")
+    test.assert(selects("\$[?@.a\r!=@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, space after !=")
+    test.assert(selects("\$[?@.a!= @.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, newline after !=")
+    test.assert(selects("\$[?@.a!=\n@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, tab after !=")
+    test.assert(selects("\$[?@.a!=\t@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, return after !=")
+    test.assert(selects("\$[?@.a!=\r@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, space before <")
+    test.assert(selects("\$[?@.a <@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, newline before <")
+    test.assert(selects("\$[?@.a\n<@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, tab before <")
+    test.assert(selects("\$[?@.a\t<@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, return before <")
+    test.assert(selects("\$[?@.a\r<@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, space after <")
+    test.assert(selects("\$[?@.a< @.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, newline after <")
+    test.assert(selects("\$[?@.a<\n@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, tab after <")
+    test.assert(selects("\$[?@.a<\t@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, return after <")
+    test.assert(selects("\$[?@.a<\r@.b]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, space before >")
+    test.assert(selects("\$[?@.b >@.a]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, newline before >")
+    test.assert(selects("\$[?@.b\n>@.a]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, tab before >")
+    test.assert(selects("\$[?@.b\t>@.a]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, return before >")
+    test.assert(selects("\$[?@.b\r>@.a]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, space after >")
+    test.assert(selects("\$[?@.b> @.a]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, newline after >")
+    test.assert(selects("\$[?@.b>\n@.a]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, tab after >")
+    test.assert(selects("\$[?@.b>\t@.a]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, return after >")
+    test.assert(selects("\$[?@.b>\r@.a]", "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]", ["[{\"a\":1,\"b\":2}]"], ["\$[1]"]))
+    test.case("whitespace, operators, space before <=")
+    test.assert(selects("\$[?@.a <=@.b]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, newline before <=")
+    test.assert(selects("\$[?@.a\n<=@.b]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, tab before <=")
+    test.assert(selects("\$[?@.a\t<=@.b]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, return before <=")
+    test.assert(selects("\$[?@.a\r<=@.b]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, space after <=")
+    test.assert(selects("\$[?@.a<= @.b]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, newline after <=")
+    test.assert(selects("\$[?@.a<=\n@.b]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, tab after <=")
+    test.assert(selects("\$[?@.a<=\t@.b]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, return after <=")
+    test.assert(selects("\$[?@.a<=\r@.b]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, space before >=")
+    test.assert(selects("\$[?@.b >=@.a]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, newline before >=")
+    test.assert(selects("\$[?@.b\n>=@.a]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, tab before >=")
+    test.assert(selects("\$[?@.b\t>=@.a]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, return before >=")
+    test.assert(selects("\$[?@.b\r>=@.a]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, space after >=")
+    test.assert(selects("\$[?@.b>= @.a]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, newline after >=")
+    test.assert(selects("\$[?@.b>=\n@.a]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+
+@test
+fn test_cts_016() [io]
+    test.case("whitespace, operators, tab after >=")
+    test.assert(selects("\$[?@.b>=\t@.a]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, return after >=")
+    test.assert(selects("\$[?@.b>=\r@.a]",
+        "[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2},{\"a\":2,\"b\":1}]",
+        ["[{\"a\":1,\"b\":1},{\"a\":1,\"b\":2}]"],
+        ["\$[0]\n\$[1]"]))
+    test.case("whitespace, operators, space between logical not and test expression")
+    test.assert(selects("\$[?! @.a]",
+        "[{\"a\":\"a\",\"d\":\"e\"},{\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("whitespace, operators, newline between logical not and test expression")
+    test.assert(selects("\$[?!\n@.a]",
+        "[{\"a\":\"a\",\"d\":\"e\"},{\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("whitespace, operators, tab between logical not and test expression")
+    test.assert(selects("\$[?!\t@.a]",
+        "[{\"a\":\"a\",\"d\":\"e\"},{\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("whitespace, operators, return between logical not and test expression")
+    test.assert(selects("\$[?!\r@.a]",
+        "[{\"a\":\"a\",\"d\":\"e\"},{\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"d\":\"f\"}]"],
+        ["\$[1]"]))
+    test.case("whitespace, operators, space between logical not and parenthesized expression")
+    test.assert(selects("\$[?! (@.a=='b')]",
+        "[{\"a\":\"a\",\"d\":\"e\"},{\"a\":\"b\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"a\":\"a\",\"d\":\"e\"},{\"a\":\"d\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[2]"]))
+    test.case("whitespace, operators, newline between logical not and parenthesized expression")
+    test.assert(selects("\$[?!\n(@.a=='b')]",
+        "[{\"a\":\"a\",\"d\":\"e\"},{\"a\":\"b\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"a\":\"a\",\"d\":\"e\"},{\"a\":\"d\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[2]"]))
+    test.case("whitespace, operators, tab between logical not and parenthesized expression")
+    test.assert(selects("\$[?!\t(@.a=='b')]",
+        "[{\"a\":\"a\",\"d\":\"e\"},{\"a\":\"b\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"a\":\"a\",\"d\":\"e\"},{\"a\":\"d\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[2]"]))
+    test.case("whitespace, operators, return between logical not and parenthesized expression")
+    test.assert(selects("\$[?!\r(@.a=='b')]",
+        "[{\"a\":\"a\",\"d\":\"e\"},{\"a\":\"b\",\"d\":\"f\"},{\"a\":\"d\",\"d\":\"f\"}]",
+        ["[{\"a\":\"a\",\"d\":\"e\"},{\"a\":\"d\",\"d\":\"f\"}]"],
+        ["\$[0]\n\$[2]"]))
+    test.case("whitespace, selectors, space between root and bracket")
+    test.assert(selects("\$ ['a']", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, newline between root and bracket")
+    test.assert(selects("\$\n['a']", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, tab between root and bracket")
+    test.assert(selects("\$\t['a']", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, return between root and bracket")
+    test.assert(selects("\$\r['a']", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, space between bracket and bracket")
+    test.assert(selects("\$['a'] ['b']", "{\"a\":{\"b\":\"ab\"}}", ["[\"ab\"]"], ["\$['a']['b']"]))
+    test.case("whitespace, selectors, newline between bracket and bracket")
+    test.assert(selects("\$['a'] \n['b']", "{\"a\":{\"b\":\"ab\"}}", ["[\"ab\"]"], ["\$['a']['b']"]))
+    test.case("whitespace, selectors, tab between bracket and bracket")
+    test.assert(selects("\$['a'] \t['b']", "{\"a\":{\"b\":\"ab\"}}", ["[\"ab\"]"], ["\$['a']['b']"]))
+    test.case("whitespace, selectors, return between bracket and bracket")
+    test.assert(selects("\$['a'] \r['b']", "{\"a\":{\"b\":\"ab\"}}", ["[\"ab\"]"], ["\$['a']['b']"]))
+    test.case("whitespace, selectors, space between root and dot")
+    test.assert(selects("\$ .a", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, newline between root and dot")
+    test.assert(selects("\$\n.a", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, tab between root and dot")
+    test.assert(selects("\$\t.a", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, return between root and dot")
+    test.assert(selects("\$\r.a", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, space between dot and name")
+    test.assert(refused("\$. a"))
+    test.case("whitespace, selectors, newline between dot and name")
+    test.assert(refused("\$.\na"))
+    test.case("whitespace, selectors, tab between dot and name")
+    test.assert(refused("\$.\ta"))
+    test.case("whitespace, selectors, return between dot and name")
+    test.assert(refused("\$.\ra"))
+    test.case("whitespace, selectors, space between recursive descent and name")
+    test.assert(refused("\$.. a"))
+    test.case("whitespace, selectors, newline between recursive descent and name")
+    test.assert(refused("\$..\na"))
+    test.case("whitespace, selectors, tab between recursive descent and name")
+    test.assert(refused("\$..\ta"))
+    test.case("whitespace, selectors, return between recursive descent and name")
+    test.assert(refused("\$..\ra"))
+    test.case("whitespace, selectors, space between bracket and selector")
+    test.assert(selects("\$[ 'a']", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, newline between bracket and selector")
+    test.assert(selects("\$[\n'a']", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, tab between bracket and selector")
+    test.assert(selects("\$[\t'a']", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, return between bracket and selector")
+    test.assert(selects("\$[\r'a']", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, space between selector and bracket")
+    test.assert(selects("\$['a' ]", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, newline between selector and bracket")
+    test.assert(selects("\$['a'\n]", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, tab between selector and bracket")
+    test.assert(selects("\$['a'\t]", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, return between selector and bracket")
+    test.assert(selects("\$['a'\r]", "{\"a\":\"ab\"}", ["[\"ab\"]"], ["\$['a']"]))
+    test.case("whitespace, selectors, space between selector and comma")
+    test.assert(selects("\$['a' ,'b']", "{\"a\":\"ab\",\"b\":\"bc\"}", ["[\"ab\",\"bc\"]"], ["\$['a']\n\$['b']"]))
+    test.case("whitespace, selectors, newline between selector and comma")
+    test.assert(selects("\$['a'\n,'b']", "{\"a\":\"ab\",\"b\":\"bc\"}", ["[\"ab\",\"bc\"]"], ["\$['a']\n\$['b']"]))
+
+@test
+fn test_cts_017() [io]
+    test.case("whitespace, selectors, tab between selector and comma")
+    test.assert(selects("\$['a'\t,'b']", "{\"a\":\"ab\",\"b\":\"bc\"}", ["[\"ab\",\"bc\"]"], ["\$['a']\n\$['b']"]))
+    test.case("whitespace, selectors, return between selector and comma")
+    test.assert(selects("\$['a'\r,'b']", "{\"a\":\"ab\",\"b\":\"bc\"}", ["[\"ab\",\"bc\"]"], ["\$['a']\n\$['b']"]))
+    test.case("whitespace, selectors, space between comma and selector")
+    test.assert(selects("\$['a', 'b']", "{\"a\":\"ab\",\"b\":\"bc\"}", ["[\"ab\",\"bc\"]"], ["\$['a']\n\$['b']"]))
+    test.case("whitespace, selectors, newline between comma and selector")
+    test.assert(selects("\$['a',\n'b']", "{\"a\":\"ab\",\"b\":\"bc\"}", ["[\"ab\",\"bc\"]"], ["\$['a']\n\$['b']"]))
+    test.case("whitespace, selectors, tab between comma and selector")
+    test.assert(selects("\$['a',\t'b']", "{\"a\":\"ab\",\"b\":\"bc\"}", ["[\"ab\",\"bc\"]"], ["\$['a']\n\$['b']"]))
+    test.case("whitespace, selectors, return between comma and selector")
+    test.assert(selects("\$['a',\r'b']", "{\"a\":\"ab\",\"b\":\"bc\"}", ["[\"ab\",\"bc\"]"], ["\$['a']\n\$['b']"]))
+    test.case("whitespace, slice, space between start and colon")
+    test.assert(selects("\$[1 :5:2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, newline between start and colon")
+    test.assert(selects("\$[1\n:5:2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, tab between start and colon")
+    test.assert(selects("\$[1\t:5:2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, return between start and colon")
+    test.assert(selects("\$[1\r:5:2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, space between colon and end")
+    test.assert(selects("\$[1: 5:2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, newline between colon and end")
+    test.assert(selects("\$[1:\n5:2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, tab between colon and end")
+    test.assert(selects("\$[1:\t5:2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, return between colon and end")
+    test.assert(selects("\$[1:\r5:2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, space between end and colon")
+    test.assert(selects("\$[1:5 :2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, newline between end and colon")
+    test.assert(selects("\$[1:5\n:2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, tab between end and colon")
+    test.assert(selects("\$[1:5\t:2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, return between end and colon")
+    test.assert(selects("\$[1:5\r:2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, space between colon and step")
+    test.assert(selects("\$[1:5: 2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, newline between colon and step")
+    test.assert(selects("\$[1:5:\n2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, tab between colon and step")
+    test.assert(selects("\$[1:5:\t2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))
+    test.case("whitespace, slice, return between colon and step")
+    test.assert(selects("\$[1:5:\r2]", "[1,2,3,4,5,6]", ["[2,4]"], ["\$[1]\n\$[3]"]))

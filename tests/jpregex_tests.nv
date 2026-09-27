@@ -1,0 +1,199 @@
+// jpregex_tests.nv — I-Regexp's grammar (RFC 9485 section 2), the
+// automaton, and the constructs I-Regexp does not have.
+
+use std.test
+use std.list
+use jperror
+use jpregex
+
+// Whether a pattern matches the whole of a text.
+fn whole(pattern: Str, text: Str) -> Bool
+    match jpregex.compile(pattern)
+        Ok(re) => jpregex.is_match(re, text)
+        Err(_) => false
+
+// Whether a pattern matches somewhere in a text.
+fn part(pattern: Str, text: Str) -> Bool
+    match jpregex.compile(pattern)
+        Ok(re) => jpregex.search(re, text)
+        Err(_) => false
+
+// The byte offset a pattern is refused at, or -1.
+fn refused_at(pattern: Str) -> Int
+    match jpregex.compile(pattern)
+        Ok(_)  => -1
+        Err(f) => f.at
+
+// Letters by case, digits as `Nd`, and `Cn` for the rest.
+fn small_category(ch: Int) -> Str
+    if ch >= 'a' and ch <= 'z'
+        return "Ll"
+    if ch >= 'A' and ch <= 'Z'
+        return "Lu"
+    if ch >= '0' and ch <= '9'
+        return "Nd"
+    "Cn"
+
+@test
+fn test_quantifiers() [io]
+    test.case("`*`, `+` and `?`")
+    test.assert(whole("ab*", "a"))
+    test.assert(whole("ab*", "abbb"))
+    test.assert(not whole("ab+", "a"))
+    test.assert(whole("ab?c", "ac"))
+    test.assert(not whole("ab?c", "abbc"))
+
+    test.case("`{n}`, `{n,}` and `{n,m}`")
+    test.assert(whole("a{3}", "aaa"))
+    test.assert(not whole("a{3}", "aa"))
+    test.assert(whole("a{2,}", "aaaaa"))
+    test.assert(not whole("a{2,}", "a"))
+    test.assert(whole("a{1,2}", "aa"))
+    test.assert(not whole("a{1,2}", "aaa"))
+    test.assert(whole("(ab){0,1}c", "c"))
+
+    test.case("a range whose maximum is below its minimum, or no digits, is refused")
+    test.assert(refused_at("a{3,2}") == 5)
+    test.assert(refused_at("a{,2}") == 2)
+    test.assert(refused_at("a{2") == 3)
+
+    test.case("a quantifier with nothing to repeat is refused")
+    test.assert(refused_at("*a") == 0)
+    test.assert(refused_at("a|+") == 2)
+
+@test
+fn test_groups_and_alternatives() [io]
+    test.case("alternatives, and a group that holds them")
+    test.assert(whole("cat|dog", "dog"))
+    test.assert(whole("(cat|dog)s", "cats"))
+    test.assert(not whole("(cat|dog)s", "cows"))
+    test.assert(whole("a||b", ""))
+    test.assert(whole("()", ""))
+
+    test.case("an unclosed or unopened group is refused")
+    test.assert(refused_at("(ab") == 3)
+    test.assert(refused_at("ab)") == 2)
+    test.assert(refused_at("a]") == 1)
+
+    test.case("a nested repetition runs in time bounded by the pattern's size")
+    test.assert(not whole("(a*)*b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+    test.assert(part("(a|aa)+b", "aaaaaaaaaaaaaaaaaaaaaaaaaaab"))
+
+@test
+fn test_character_classes() [io]
+    test.case("ranges, a negated class, and `-` first or last")
+    test.assert(whole("[a-c]+", "abcab"))
+    test.assert(not whole("[a-c]", "d"))
+    test.assert(whole("[^a-c]", "d"))
+    test.assert(whole("[-a]+", "-a-"))
+    test.assert(whole("[a-]+", "a-"))
+    test.assert(whole("[\\]\\[]+", "][]"))
+
+    test.case("a class that is empty, unclosed, reversed or holds `[` is refused")
+    test.assert(refused_at("[]") == 1)
+    test.assert(refused_at("[ab") == 3)
+    test.assert(refused_at("[b-a]") == 4)
+    test.assert(refused_at("[a[]") == 2)
+    test.assert(refused_at("[--a]") == 2)
+
+    test.case("`.` is any character but a line break")
+    test.assert(whole("a.c", "abc"))
+    test.assert(whole("a.c", "aéc"))
+    test.assert(not whole("a.c", "a\nc"))
+    test.assert(not whole("a.c", "a\rc"))
+
+    test.case("`^` and `$` are ordinary characters")
+    test.assert(whole("^a$", "^a$"))
+    test.assert(not whole("^a", "a"))
+
+@test
+fn test_escapes() [io]
+    test.case("the single-character escapes")
+    test.assert(whole("\\.\\*\\+\\?\\(\\)\\[\\]\\{\\}\\|\\\\\\^\\-", ".*+?()[]{}|\\^-"))
+    test.assert(whole("a\\nb\\tc\\rd", "a\nb\tc\rd"))
+    test.assert(whole("[\\n\\t]+", "\n\t"))
+
+    test.case("an escape I-Regexp does not define is refused")
+    test.assert(refused_at("a\\q") == 2)
+    test.assert(refused_at("\\") == 1)
+
+    test.case("a refusal's offset is a byte offset, after a multi-byte character")
+    test.assert(refused_at("é€😀)") == 9)
+
+@test
+fn test_category_escapes() [io]
+    test.case("a major category matches every minor one")
+    match jpregex.compile_with("\\p{L}+\\p{Nd}", small_category)
+        Ok(re) =>
+            test.assert(re.uses_categories)
+            test.assert(jpregex.is_match(re, "abC7"))
+            test.assert(not jpregex.is_match(re, "ab77"))
+        Err(_) => test.assert(false)
+
+    test.case("`\\P` is the complement, and a category may stand in a class")
+    match jpregex.compile_with("\\P{Lu}[\\p{Lu}0]", small_category)
+        Ok(re) =>
+            test.assert(jpregex.is_match(re, "aB"))
+            test.assert(jpregex.is_match(re, "a0"))
+            test.assert(not jpregex.is_match(re, "AB"))
+        Err(_) => test.assert(false)
+
+    test.case("the category names are RFC 9485's")
+    for name in ["L", "Lu", "Ll", "Lt", "Lm", "Lo", "M", "Mn", "Mc", "Me", "N", "Nd", "Nl", "No",
+                 "P", "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po", "Z", "Zs", "Zl", "Zp",
+                 "S", "Sm", "Sc", "Sk", "So", "C", "Cc", "Cf", "Co", "Cn"]
+        test.assert(jpregex.needs_categories("\\p{" + name + "}"))
+    test.assert(not jpregex.is_iregexp("\\p{Lx}"))
+    test.assert(not jpregex.is_iregexp("\\p{X}"))
+    test.assert(not jpregex.is_iregexp("\\p{Lu"))
+    test.assert(not jpregex.is_iregexp("\\pL"))
+    test.assert(not jpregex.is_iregexp("[\\P{L}]"))
+    test.assert(not jpregex.is_iregexp("[a-\\p{L}]"))
+    test.assert(not jpregex.is_iregexp("\\p{L\u{e9}}"))
+
+    test.case("without a lookup, compile names the escape's offset")
+    match jpregex.compile("ab\\P{L}")
+        Ok(_)  => test.assert(false)
+        Err(f) =>
+            test.assert(f.kind == JpNoCategoryLookup)
+            test.assert(f.at == 2)
+
+@test
+fn test_the_constructs_i_regexp_does_not_have() [io]
+    test.case("each is named")
+    test.assert(jpregex.unsupported_construct("(?<=a)b") == Some("lookbehind"))
+    test.assert(jpregex.unsupported_construct("(?<!a)b") == Some("lookbehind"))
+    test.assert(jpregex.unsupported_construct("(?!a)b") == Some("lookahead"))
+    test.assert(jpregex.unsupported_construct("(?<n>a)") == Some("named group"))
+    test.assert(jpregex.unsupported_construct("(?P<n>a)") == Some("named group"))
+    test.assert(jpregex.unsupported_construct("(?:a)") == Some("non-capturing group"))
+    test.assert(jpregex.unsupported_construct("a++") == Some("possessive quantifier"))
+    test.assert(jpregex.unsupported_construct("a{2}?") == Some("lazy quantifier"))
+    test.assert(jpregex.unsupported_construct("\\bword") == Some("anchor"))
+    test.assert(jpregex.unsupported_construct("\\d+") == Some("multi-character escape"))
+    test.assert(jpregex.unsupported_construct("[a-z-[aeiou]]") == Some("class subtraction"))
+    test.assert(jpregex.unsupported_construct("a\\.b)") == Some("syntax"))
+    test.assert(jpregex.unsupported_construct("[a]") == None)
+
+@test
+fn test_the_automaton_has_a_size() [io]
+    test.case("a bounded repetition grows the automaton")
+    match jpregex.compile("(a|b){1,50}")
+        Ok(re) =>
+            test.assert(re.states > 100)
+            test.assert(list.len(re.program) == re.states)
+        Err(_) => test.assert(false)
+
+    test.case("search finds a match at the end, and in the empty text")
+    test.assert(part("z", "aaaz"))
+    test.assert(part("a*", ""))
+    test.assert(not part("z", ""))
+
+@test
+fn test_odd_text_and_odd_patterns() [io]
+    test.case("a text that is not UTF-8 is read a byte at a time")
+    test.assert(whole("a.", "a\xc3"))
+    test.assert(whole("..", "\xe2\x82"))
+
+    test.case("a pattern that does not parse needs no categories")
+    test.assert(not jpregex.needs_categories("("))

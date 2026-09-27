@@ -1,19 +1,8 @@
-// jpquery_tests.nv — the API suite for the parser and the typed query.
+// jpquery_tests.nv — the parser, the typed query and its checks.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: jsonpath-nv.<module>.<fn>`.
-//
-// THE CASES ARE RFC 9535's OWN.  The specification's § 1.5 gives a
-// bookstore document and a table of queries against it with the exact
-// node list each one must produce; §§ 2.3 to 2.5 give a further table
-// per selector; § 2.4 gives the well-typedness examples, including the
-// four it marks invalid.  Those are the queries below, and the whole
-// of the JSONPath Compliance Test Suite becomes a generated run beside
-// this one when the implementation lands.
-//
-// THE WELL-TYPEDNESS CASES ARE THE ONES IMPLEMENTATIONS SKIP.  § 2.4.3
-// makes `length(@.*)` a query that does not parse, not a query that
-// answers nothing, and the last test here is what keeps that true.
+// The queries are RFC 9535's own: section 1.5's table, the selector
+// examples of section 2.3, and the well-typedness examples of section
+// 2.4.3.  The JSONPath Compliance Test Suite is in cts_tests.nv.
 
 use std.test
 use std.list
@@ -83,14 +72,14 @@ fn test_the_five_selectors_each_parse_to_their_own_arm() [io]
                 JpSliceSel(b) =>
                     test.assert(b.start == None)
                     test.assert(b.end == None)
-                    test.assert(b.step == Some(0 - 1))
+                    test.assert((b.step ?? 0) == 0 - 1)
                 _             =>
                     test.assert(false)
         JpDescendantSeg(_) =>
             test.assert(false)
 
-    test.case("a step of zero is refused — it can only select nothing")
-    test.assert(refused("$[::0]") == Some(JpBadSlice))
+    test.case("a step of zero parses, and selects nothing (section 2.3.4.2.2)")
+    test.assert(refused("$[::0]") == None)
 
     test.case("an index past the interoperable range is refused")
     test.assert(jpquery.MAX_INDEX == 9007199254740991)
@@ -135,7 +124,7 @@ fn test_the_filter_grammar_parses_to_the_expression_tree() [io]
     test.case("a filter may reach the document root, not only the node")
     test.assert(refused("$[?@.a == $.expected]") == None)
 
-    test.case("a comparison operand must be a SINGULAR query")
+    test.case("a comparison operand must be a singular query")
     test.assert(refused("$[?@.* == 1]") == Some(JpNotSingular))
     test.assert(refused("$[?@[?@.b] == 1]") == Some(JpNotSingular))
 
@@ -221,7 +210,7 @@ fn test_the_ways_a_query_is_not_one() [io]
 
     test.case("a fault has a name and a message a program can quote")
     test.assert(jperror.kind_name(JpNotSingular) == "not-singular")
-    let f = jperror.fault(JpBadSlice, 7, 12)
+    let f = jperror.fault(JpBadIndex, 7, 12)
     test.assert(f.at == 7)
     test.assert(f.to == 12)
     test.assert(jperror.message(f) != "")
@@ -236,3 +225,36 @@ fn test_render_is_a_normalisation_and_not_an_echo() [io]
 
     test.case("so two spellings of one query are one string")
     test.assert(jpquery.render(ok("$[\"a\"]")) == jpquery.render(ok("$.a")))
+
+@test
+fn test_the_parser_names_where_a_query_went_wrong() [io]
+    test.case("an empty query has no root, at an empty range")
+    match jpquery.parse("")
+        Ok(_)  => test.assert(false)
+        Err(f) =>
+            test.assert(f.kind == JpNoRoot)
+            test.assert(f.to == 0)
+
+    test.case("a parenthesis left open at the end")
+    test.assert(refused("$[?(@.a") == Some(JpUnexpectedEnd))
+    test.assert(refused("$[?(@.a]") == Some(JpBadFilter))
+
+    test.case("arguments not separated by a comma")
+    test.assert(refused("$[?length(@.a @.b) == 1]") == Some(JpBadFilter))
+
+    test.case("a logical expression passed where a value belongs")
+    test.assert(refused("$[?match(@.a == 'x', 'y')]") == Some(JpWrongArgumentType))
+    test.assert(refused("$[?count(1) == 1]") == Some(JpWrongArgumentType))
+    test.assert(refused("$[?length(match(@.a, 'x')) == 1]") == Some(JpWrongArgumentType))
+
+    test.case("a comparison of two comparisons")
+    test.assert(refused("$[?@.a == 1 == 2]") == Some(JpBadSelector))
+
+@test
+fn test_a_call_with_a_logical_argument_renders() [io]
+    let a = JpQuery { absolute: false, segments: [JpChildSeg([JpNameSel("a")])] }
+    let c = JpCall { function: JpFnCount, arguments: [JpArgLogical(JpExprTest(a))] }
+    let q = JpQuery { absolute: true, segments: [JpChildSeg([JpFilterSel(
+        JpExprCompare(JpOperandCall(c), JpOpEq, JpOperandLiteral(JpLitInt(1))))])] }
+    test.case("the argument is written as an expression")
+    test.assert(jpquery.render(q) == "$[?count(@['a']) == 1]")
