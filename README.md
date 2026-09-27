@@ -11,12 +11,6 @@ value, checked, and run against the standard library's JSON value.
 $.store.book[?@.price < 10].title
 ```
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is
-declared with its full signature, but every body is a `todo()` that
-panics when called. The package is published so its design can be
-reviewed and depended on before it is implemented. Version 0.1.0 will
-be the first working release.
-
 ## What it is
 
 A **query** begins with `$`, the document's root, and is a sequence of
@@ -90,10 +84,7 @@ fn main() [io]
 
 It prints `"ada" at $['users'][0]['n']`.
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a `not implemented:
-jsonpath-nv.<module>.<fn>` panic. The tests are the specification the
-implementation will have to satisfy.
+Build and test with `novo pkg build` and `novo test`.
 
 ## What the package contains
 
@@ -164,8 +155,7 @@ later costs no second query.
    before the first.
 7. **A slice's defaults depend on the sign of its step.** An absent
    start is absent and not zero, so `[::-1]` starts at the end. A step
-   of zero is `JpBadSlice`, because RFC 9535 section 2.3.4.2.2 makes it
-   select nothing.
+   of zero parses and selects nothing (RFC 9535 section 2.3.4.2.2).
 8. **An array index is bounded at 2^53 - 1.** RFC 9535 section 2.1 sets
    that range, because a JSON number is a double. Outside it the parse
    answers `JpBadIndex`.
@@ -188,16 +178,16 @@ later costs no second query.
     `JpNoCategoryLookup`; `jpregex.compile_with` takes a
     `fn(Int) -> Str` that answers a code point's category, and
     `jpeval.select_categorised` carries it through the evaluator.
+    Under `jpeval.select` such a pattern does not compile, and its
+    `match()` or `search()` is false.
 12. **Comparison is structural.** RFC 9535 section 2.3.5.2.2 compares
     arrays and objects by their contents, treats `1` and `1.0` as
-    equal, and ignores member order. `jpeval.value_equals` and
-    `value_order` are that rule, and they are public because the
-    standard library has no equality over JSON values to defer to.
-13. **`{}` and `null` cannot be told apart through this package
-    today.** The standard library's JSON accessors answer the same for
-    both, so `length(@) == 0` cannot be true for `{}` and false for
-    `null` as RFC 9535 section 2.4.4 requires. The defect is filed
-    against the toolchain; see "What is not included".
+    equal, and ignores member order. `jpeval.value_equals`, which is
+    `std.json.equals`, and `value_order` are that rule.
+13. **An object's members are visited in the order of the document's
+    text.** RFC 9535 leaves that order to the implementation, and
+    `std.json` keeps it, so `$.*` over `{"b":1,"a":2}` answers `1`
+    before `2`.
 14. **`jperror.kind_name` is stable across releases.** The spellings
     are lower case with hyphens, such as `not-singular`, because
     programs quote them in their own messages and tests.
@@ -207,15 +197,6 @@ later costs no second query.
 - **A JSON value type of this package's own.** Queries run over
   `std.json`'s value, because a second JSON type in one program would
   mean converting every document before it could be queried.
-- **A correct `length()` for `{}` against `null`.** See rule 13.
-  `json.is_null`, `json.type_of` and `json.equals` are the smallest
-  additions to the standard library that would close it, and they are
-  filed as
-  `std-json-cannot-tell-an-empty-object-from-null-and-has-no-deep-equality`.
-- **Cheap access to one array element.** `json.to_list` is the only way
-  into an array, so reaching element 5 of a 100 000-element array
-  materialises the whole list, and a descendant walk pays that once per
-  array it visits.
 - **A microcontroller build, and a browser build.** `std.json` is
   refused on the embedded tier and has no wasm runtime, so neither is
   claimed here even though this package's own arithmetic would run.
@@ -252,52 +233,24 @@ later costs no second query.
 ## Tests
 
 ```bash
-novo test --isolate tests/jpquery_tests.nv   # 8 tests: the grammar and the type rules
-novo test --isolate tests/jpeval_tests.nv    # 8 tests: the walk and the paths
+novo test tests/jpquery_tests.nv    # the grammar and the type rules
+novo test tests/jpeval_tests.nv     # the walk, the bounds, the paths and the functions
+novo test tests/jpregex_tests.nv    # I-Regexp's grammar and the automaton
+novo test tests/jprender_tests.nv   # render, and check_types on a query built in code
+novo test tests/jperror_tests.nv    # the fault kinds and the message
+novo test tests/cts_tests.nv        # the JSONPath Compliance Test Suite
+bash tests/coverage.sh              # line coverage over src/
 ```
 
 RFC 9535 is the specification, and `tests/jpeval_tests.nv` quotes the
-bookstore document and table from its section 1.5, so a reviewer can
-check the port against the specification rather than against this
-package. `serde_json_path` in Rust and `jsonpath-ng` in Python are the
-implementations to check against. The oracle is the JSONPath Compliance
-Test Suite, the community suite the specification's authors maintain,
-which lists queries and documents with the exact nodelist each must
-produce.
-
-The suite asserts that a non-singular query is refused as a comparison
-operand, that `length(@.*)` does not parse, that `count(@.*)` does,
-that `$[2,0]` answers in selector order, that a slice with a negative
-step starts at the end, that a step of zero is refused, that a
-descendant segment visits in document order, and that every node
-carries the normalized path section 2.7 defines.
-
-The tests compile today and fail at run, each on the `not implemented`
-panic that is its body. That is the expected state of an interface
-release. They turn green one at a time as bodies land.
-
-## Implementation status
-
-Nothing is implemented, apart from the one constant. Every function
-here is declared with its signature and its effect row, and every body
-is a `todo()`.
-
-| Item | Implemented |
-| --- | --- |
-| `jpquery.MAX_INDEX` | yes (it is a constant) |
-| `jperror.fault`, `.kind_name`, `.message` | no |
-| `jpquery.parse`, `.parse_singular`, `.is_singular`, `.render` | no |
-| `jpquery.function_name`, `.function_named` | no |
-| `jpquery.parameter_types`, `.result_type`, `.check_types` | no |
-| `jpquery.depth`, `.has_descendant` | no |
-| `jpeval.default_limits`, `.select`, `.select_with` | no |
-| `jpeval.select_values`, `.select_paths`, `.select_one`, `.query` | no |
-| `jpeval.select_categorised` | no |
-| `jpeval.normalized_path`, `.name_step`, `.index_step` | no |
-| `jpeval.path_steps`, `.at_path` | no |
-| `jpeval.value_equals`, `.value_order`, `.value_comparable` | no |
-| `jpregex.compile`, `.compile_with`, `.is_match`, `.search` | no |
-| `jpregex.is_iregexp`, `.needs_categories`, `.unsupported_construct` | no |
+bookstore document and table from its section 1.5. The oracle is the
+JSONPath Compliance Test Suite, which lists queries with the documents
+and the exact nodelists they must produce, and queries that must be
+refused. `tests/cts_tests.nv` holds 702 of its 706 cases, written by
+`tools/cts.py`. The tool lists the four left out: two whose query holds
+U+0000, which a `Str` cannot, and two that read `^` and `$` in a
+`match()` pattern as anchors, which RFC 9485's grammar makes ordinary
+characters.
 
 ## Licence
 

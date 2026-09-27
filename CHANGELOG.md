@@ -4,6 +4,45 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.1.0 — 2026-09-27
+
+The first implementation of the interface published as 0.0.1: the
+parser with the well-typedness rules, the evaluator, normalized paths
+and I-Regexp.
+
+### Added
+
+- `jpquery.quote` writes a string as RFC 9535 section 2.7 quotes a
+  member name, which `render` and normalized paths use.
+- `jpregex.no_categories`, a category lookup that knows no category.
+- `JpRegex.program` and `JpRegex.category_of`, and the `JpRegexInst`
+  type, hold the compiled automaton.
+- `tests/cts_tests.nv` holds 702 of the JSONPath Compliance Test
+  Suite's 706 cases, written by `tools/cts.py`, which lists the four
+  left out and why.
+
+### Changed
+
+These break code written against 0.0.x.
+
+- A slice with a step of zero parses and selects nothing, as RFC 9535
+  section 2.3.4.2.2 and the compliance suite have it.  `JpBadSlice` is
+  gone.
+- A query that is not singular passed where a value is declared, as in
+  `length(@.*)`, is `JpWrongArgumentType`.  `JpNotSingular` is for a
+  comparison's operand and for `parse_singular`.
+- `jpquery.depth` counts a query's segments.
+- `jpeval.value_equals` is `std.json.equals`.  `length()` of `{}` is 0
+  and of `null` is Nothing, and an array element is read with
+  `json.index`, now that the standard library answers both.
+
+### Toolchain
+
+- The toolchain floor is 0.13.0.
+- `jpquery.is_singular` tests each segment with a function that answers
+  a `Bool`.  The 0.13.0 compiler leaks a list element that a `match`
+  inside a loop returns from.
+
 ## 0.0.3 — 2026-09-25
 
 Every field of `JpLimits` is now declared `var`.  Under novo 0.10.0 a
