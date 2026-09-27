@@ -3,7 +3,6 @@
 
 use std.test
 use std.list
-use jperror
 use jpregex
 
 // Whether a pattern matches the whole of a text.

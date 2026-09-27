@@ -2,7 +2,6 @@
 // built in code gets.
 
 use std.test
-use std.list
 use jperror
 use jpquery
 

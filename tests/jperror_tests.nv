@@ -1,7 +1,6 @@
 // jperror_tests.nv — the fault kinds, their names and the message.
 
 use std.test
-use std.str
 use jperror
 
 @test
