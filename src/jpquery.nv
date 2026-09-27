@@ -216,15 +216,13 @@ pub fn parse_singular(query: Str) -> Result<JpQuery, jperror.JpFault> []
 // ```
 pub fn is_singular(q: JpQuery) -> Bool []
     for seg in q.segments
-        if not singular_segment(seg)
-            return false
+        match seg
+            JpDescendantSeg(_) =>
+                return false
+            JpChildSeg(sels)   =>
+                if list.len(sels) != 1 or not names_one(sels[0])
+                    return false
     true
-
-// Whether a segment is a child segment with one name or index selector.
-fn singular_segment(seg: JpSegment) -> Bool
-    match seg
-        JpDescendantSeg(_) => false
-        JpChildSeg(sels)   => list.len(sels) == 1 and names_one(sels[0])
 
 // Whether a selector names one child: a name or an index.
 fn names_one(sel: JpSelector) -> Bool
