@@ -98,12 +98,16 @@ pub fn compile(pattern: Str) -> Result<JpRegex, jperror.JpFault> []
 // ```
 pub fn compile_with(pattern: Str,
                     category_of: fn(Int) -> Str) -> Result<JpRegex, jperror.JpFault> []
-    var p = RxParser { cps: code_points(pattern), text: pattern, pos: 0, cats: false }
+    var p = RxParser { cps: code_points(pattern), text: pattern, pos: 0, cats: false, depth: 0 }
+    if list.len(p.cps) > RX_MOST_CHARS
+        return Err(jperror.fault(JpBadRegex, 0, str.len(pattern)))
     let tree = alternation(p)!
     if p.pos < list.len(p.cps)
         return Err(rx_fault(p))
     var prog: [JpRegexInst] = []
     emit(prog, tree)
+    if list.len(prog) > RX_MOST_STATES
+        return Err(jperror.fault(JpBadRegex, 0, str.len(pattern)))
     list.push(prog, inst(3, 0, 0))
     Ok(JpRegex { states: list.len(prog), uses_categories: p.cats, program: prog,
                  category_of: category_of })
@@ -246,6 +250,20 @@ struct RxParser
     var pos: Int
     // Whether a category escape has been read.
     var cats: Bool
+    // How many groups are open.
+    var depth: Int
+
+// The longest pattern compiled, in code points; a longer one is
+// `JpBadRegex`.
+const RX_MOST_CHARS = 10000
+
+// The most instructions a pattern may compile to.  Counted repeats of
+// repeats multiply, so the emitter stops at this size and the pattern
+// is `JpBadRegex`.
+const RX_MOST_STATES = 100000
+
+// The most groups open at once.
+const RX_MOST_DEPTH = 64
 
 // The code point at `i`, or -1.
 fn at(cps: [Int], i: Int) -> Int
@@ -345,7 +363,8 @@ fn rx_number(var p: RxParser) -> Result<Int, jperror.JpFault>
         let c = cur(p)
         if c < '0' or c > '9'
             break
-        n = n * 10 + c - '0'
+        if n <= RX_MOST_STATES
+            n = n * 10 + c - '0'
         p.pos = p.pos + 1
     if p.pos == start
         return Err(rx_fault(p))
@@ -355,8 +374,12 @@ fn rx_number(var p: RxParser) -> Result<Int, jperror.JpFault>
 fn atom(var p: RxParser) -> Result<RxNode, jperror.JpFault>
     let c = cur(p)
     if c == '('
+        if p.depth >= RX_MOST_DEPTH
+            return Err(rx_fault(p))
         p.pos = p.pos + 1
+        p.depth = p.depth + 1
         let inner = alternation(p)!
+        p.depth = p.depth - 1
         if cur(p) != ')'
             return Err(rx_fault(p))
         p.pos = p.pos + 1
@@ -544,6 +567,8 @@ fn emit_alt(var prog: [JpRegexInst], items: [RxNode], i: Int)
 // A node repeated from `lo` to `hi` times, `hi` -1 for no bound.
 fn emit_repeat(var prog: [JpRegexInst], m: RxNode, lo: Int, hi: Int)
     for _ in 0..lo
+        if list.len(prog) > RX_MOST_STATES
+            return
         emit(prog, m)
     if hi < 0
         let fork = list.len(prog)
@@ -554,6 +579,8 @@ fn emit_repeat(var prog: [JpRegexInst], m: RxNode, lo: Int, hi: Int)
         return
     var forks: [Int] = []
     for _ in lo..hi
+        if list.len(prog) > RX_MOST_STATES
+            return
         list.push(forks, list.len(prog))
         list.push(prog, inst(1, 0, 0))
         emit(prog, m)

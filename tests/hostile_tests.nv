@@ -1,0 +1,52 @@
+// hostile_tests.nv — queries and patterns a few kilobytes long.
+
+use std.test
+use jpquery
+use jpregex
+
+fn refused(r: Result<JpQuery, JpFault>) -> Bool []
+    match r
+        Err(_) => true
+        Ok(_)  => false
+
+@test
+fn test_deeply_nested_queries_are_refused() [io]
+    test.case("parentheses in a filter")
+    test.assert(refused(jpquery.parse("$[?" + "(".repeat(100000) + "@.a" + ")".repeat(100000) + "]")))
+    test.case("negations in a filter")
+    test.assert(refused(jpquery.parse("$[?" + "!".repeat(100000) + "@.a]")))
+    test.case("nested filters")
+    test.assert(refused(jpquery.parse("$" + "[?@".repeat(50000) + "]".repeat(50000))))
+    test.case("nested function calls")
+    test.assert(refused(jpquery.parse("$[?" + "length(".repeat(50000) + "@" + ")".repeat(50000) + "]")))
+
+@test
+fn test_honest_nesting_still_parses() [io]
+    test.assert(not refused(jpquery.parse("$[?((@.a == 1 && (@.b == 2 || length(@.c) > 3)))]")))
+    test.assert(not refused(jpquery.parse("$" + "[?@".repeat(30) + "]".repeat(30))))
+
+@test
+fn test_a_pattern_that_multiplies_its_states_is_bounded() [io]
+    test.case("nested counted repeats")
+    match jpregex.compile("((((a{1,100}){1,100}){1,100}){1,100}){1,100}")
+        Err(_) => test.assert(true)
+        Ok(re) => test.assert(re.states < 10000000)
+    test.case("a long alternation")
+    match jpregex.compile("a|".repeat(100000) + "a")
+        Err(_) => test.assert(true)
+        Ok(_)  => test.assert(false)
+    test.case("a repeat count past 64 bits")
+    match jpregex.compile("a{99999999999999999999999}")
+        Err(_) => test.assert(true)
+        Ok(re) => test.assert(re.states < 10000000)
+    test.case("honest patterns still compile")
+    match jpregex.compile("(a|b){1,1000}")
+        Ok(re) => test.assert(re.states > 1000)
+        Err(_) => test.assert(false)
+    match jpregex.compile("[0-9]{4}-[0-9]{2}")
+        Ok(_)  => test.assert(true)
+        Err(_) => test.assert(false)
+    test.case("deep groups")
+    match jpregex.compile("(".repeat(100000) + "a" + ")".repeat(100000))
+        Err(_) => test.assert(true)
+        Ok(_)  => test.assert(false)

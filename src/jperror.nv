@@ -35,7 +35,8 @@ pub enum JpFaultKind
     JpBadIndex
     // A filter expression that does not parse: a dangling `&&`, an
     // unclosed parenthesis, a literal standing alone, a comparison of
-    // two comparisons.
+    // two comparisons, or filters and function arguments nested more
+    // than 64 deep.
     JpBadFilter
     // A function name that is not one of the five RFC 9535 defines.
     JpUnknownFunction

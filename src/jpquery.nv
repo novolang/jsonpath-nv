@@ -178,7 +178,7 @@ pub struct JpCall
 //         Ok(q)  => println("${list.len(q.segments)}")
 // ```
 pub fn parse(query: Str) -> Result<JpQuery, jperror.JpFault> []
-    var p = Parser { text: query, pos: 0 }
+    var p = Parser { text: query, pos: 0, depth: 0 }
     if peek(p) != '$'
         return Err(jperror.fault(JpNoRoot, 0, min_int(1, str.len(query))))
     let q = query_at(p)!
@@ -398,6 +398,18 @@ pub fn has_descendant(q: JpQuery) -> Bool []
 struct Parser
     text: Str
     var pos: Int
+    // How many filter expressions and function arguments are open.
+    var depth: Int
+
+// The most filter expressions and function arguments open at once.
+const MAX_NESTING = 64
+
+// One level deeper, or the fault that refuses it.
+fn enter(var p: Parser) -> Result<Int, jperror.JpFault>
+    if p.depth >= MAX_NESTING
+        return Err(fault_here(p, JpBadFilter))
+    p.depth = p.depth + 1
+    Ok(p.depth)
 
 // The byte at the parser's position, or -1 at the end.
 fn peek(p: Parser) -> Int
@@ -641,6 +653,12 @@ fn hex_value(b: Int) -> Int
 
 // `a || b || ...`.
 fn logical_or(var p: Parser) -> Result<JpExpr, jperror.JpFault>
+    let _ = enter(p)!
+    let r = logical_or_inside(p)
+    p.depth = p.depth - 1
+    r
+
+fn logical_or_inside(var p: Parser) -> Result<JpExpr, jperror.JpFault>
     var left = logical_and(p)!
     for _ in p.pos..str.len(p.text)
         let before = p.pos
@@ -855,6 +873,12 @@ fn call(var p: Parser, name: Str, at: Int) -> Result<JpCall, jperror.JpFault>
 // One function argument: a literal, a query or a call standing alone,
 // or else a logical expression.
 fn argument(var p: Parser) -> Result<JpArgument, jperror.JpFault>
+    let _ = enter(p)!
+    let r = argument_inside(p)
+    p.depth = p.depth - 1
+    r
+
+fn argument_inside(var p: Parser) -> Result<JpArgument, jperror.JpFault>
     let start = p.pos
     let b = peek(p)
     if b == '@' or b == '$' or b == '\'' or b == '"' or b == '-' or is_digit(b) or b >= 'a' and b <= 'z'

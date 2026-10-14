@@ -4,6 +4,12 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## Unreleased
+
+### Fixed
+
+- Filters and function arguments nested more than 64 deep are refused, as are I-Regexp patterns of more than 10000 characters, more than 64 open groups or more than 100000 states.
+
 ## 0.1.0 — 2026-09-27
 
 The first implementation of the interface published as 0.0.1: the
